@@ -7075,6 +7075,24 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
         "updated_at_utc":datetime.now(timezone.utc).isoformat().replace("+00:00","Z")}
 
 
+def _ai_copilot_dashboard_context() -> dict:
+    """Collect bounded public dashboard snapshots only when a user sends a chat message."""
+    v2 = _blofin_v2_public_cycle_snapshot()
+    gem = latest_report_from_turso()
+    health = build_feed_health_report(_crypto_market_board())
+    cycles = v2.get("cycles") if isinstance(v2.get("cycles"), list) else []
+    candidates = gem.get("candidates") if isinstance(gem.get("candidates"), list) else []
+    allowed = ("symbol", "name", "chain", "status", "tier", "score", "qualification_status", "price_usd", "volume_24h_usd", "liquidity_usd", "risk_score", "opportunity_score", "reason_fa", "updated_at_utc")
+    safe_candidates = [{key: item.get(key) for key in allowed if key in item} for item in candidates[:5] if isinstance(item, dict)]
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "challenge1_v2": {"status": v2.get("status"), "environment": v2.get("environment"), "latest_cycle_id": v2.get("latest_cycle_id"), "scan_time_utc": v2.get("scan_time_utc"), "run_state": v2.get("run_state"), "five_assets": cycles[:5]},
+        "gem_hunter": {"status": gem.get("status"), "generated_at_utc": gem.get("generated_at_utc"), "discovered_candidate_count": gem.get("discovered_candidate_count"), "tier1_count": gem.get("gem_hunter_v3_tier1_count"), "tier2_count": gem.get("gem_hunter_v3_tier2_count"), "top_candidates": safe_candidates, "trade_authorization": "NO_TRADE"},
+        "data_health": {key: health.get(key) for key in ("status", "observed_at_utc", "age_seconds", "stale_after_seconds", "verified_symbols", "observed_symbols", "expected_symbols", "providers", "reason")},
+        "read_only": True, "orders_submitted": False,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
