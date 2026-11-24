@@ -128,6 +128,14 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn("manualTrade.sl.value=String(sl>0?sl:suggestedSl)", self.source)
         self.assertIn("manualTrade.tp.value=String(tp>0?tp:suggestedTp)", self.source)
 
+    def test_scan_gate_renderer_and_incomplete_data_are_persian(self):
+        # Guard the regression fixed in Commit 300bcf5 and the Persian scan labels.
+        self.assertIn("function renderGates(gates)", self.source)
+        self.assertIn("function statusFa", self.source)
+        self.assertIn("تحلیل نیمه‌کامل", self.source)
+        self.assertIn("داده دریافت نشد", self.source)
+        self.assertIn("فعلاً معامله نکن", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
