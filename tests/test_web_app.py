@@ -691,10 +691,17 @@ class WebAppHttpTests(unittest.TestCase):
             "payload_json": json.dumps(payload),
         }
         connection = Mock()
-        connection.execute.side_effect = [Mock(), Mock(fetchall=Mock(return_value=[row]))]
-        with patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \
-             patch.object(web_app, "connect_database", return_value=connection):
+        connection.execute.return_value = Mock(fetchall=Mock(return_value=[row]))
+        with web_app.V2_PUBLIC_SNAPSHOT_CACHE_LOCK:
+            web_app.V2_PUBLIC_SNAPSHOT_CACHE.update({"expires_at": 0.0, "payload": None})
+        with (
+            patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+            patch.object(web_app, "connect_database", return_value=connection) as connect,
+        ):
             snapshot = web_app._blofin_v2_public_cycle_snapshot()
+            cached_snapshot = web_app._blofin_v2_public_cycle_snapshot()
+        connect.assert_called_once()
+        self.assertEqual(cached_snapshot, snapshot)
         self.assertEqual(snapshot["status"], "OK")
         self.assertEqual(len(snapshot["cycles"]), 1)
         cycle = snapshot["cycles"][0]
