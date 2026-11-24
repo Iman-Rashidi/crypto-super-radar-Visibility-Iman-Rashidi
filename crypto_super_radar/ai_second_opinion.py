@@ -91,7 +91,7 @@ def _post_openrouter_with_fallback(
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v8-openrouter-free-model-fallback-5m-candle-chart-elliott-wave"
+PROMPT_VERSION = "free-second-opinion-v9-v2-explicit-schema-specialist-alias-normalization"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -949,7 +949,23 @@ def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
         '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
         '"risk_flags":["..."],"rationale_fa":"..."} '
-        "Approve only when every required V2 input is internally consistent, the higher-timeframe regime aligns, "
+        "Every specialist_views role and wave_analyst is REQUIRED; never omit a role. "
+        "If evidence is insufficient, use UNKNOWN/UNCERTAIN/INSUFFICIENT_DATA and explain why; never invent a positive view. "
+        "The following is a complete fail-closed JSON shape example. Copy every key, but replace every value using the supplied evidence; "
+        "the example values are not a recommendation: "
+        '{"specialist_views":{'
+        '"market_regime":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
+        '"technical":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
+        '"news_sentiment":{"view":"UNKNOWN","reason_fa":"داده کافی نیست."},'
+        '"bull_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
+        '"bear_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
+        '"trader":{"proposal":"NO_TRADE","reason_fa":"جهت معتبر نیست."},'
+        '"risk_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک قابل تأیید نیست."},'
+        '"portfolio_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک پرتفوی قابل تأیید نیست."}},'
+        '"wave_analyst":{"verdict":"UNCERTAIN","phase":"' + phase + '","direction":"' + direction + '","reason_fa":"موج مستقل تأیید نشده است."},'
+        '"final_rating":"REVIEW","risk_flags":["INSUFFICIENT_EVIDENCE"],'
+        '"rationale_fa":"تا رفع کمبود شواهد، ورود تأیید نمی‌شود."}'
+        " Approve only when every required V2 input is internally consistent, the higher-timeframe regime aligns, "
         "the exact Elliott phase/direction is confirmed and matches the intended side, and the protective plan is valid."
     )
     user = "Review only this sanitized completed-candle V2 evidence:\\n" + json.dumps(
@@ -1353,7 +1369,101 @@ def _validated_v2_review(
     return result
 
 
+_SPECIALIST_CONTAINER_ALIASES = ("specialist_views", "specialist_analysis", "views")
+_SPECIALIST_ROLE_ALIASES = {
+    "market_regime": ("market_regime", "market_regime_analyst", "regime_analyst", "regime", "market"),
+    "technical": ("technical", "technical_analyst", "tech_analyst", "tech"),
+    "news_sentiment": ("news_sentiment", "news_sentiment_analyst", "sentiment_analyst", "sentiment", "news"),
+    "bull_researcher": ("bull_researcher", "bullish_researcher", "bull_case", "bull"),
+    "bear_researcher": ("bear_researcher", "bearish_researcher", "bear_case", "bear"),
+    "trader": ("trader", "trade", "trading", "trade_proposal"),
+    "risk_manager": ("risk_manager", "risk_analyst", "risk_analysis", "risk"),
+    "portfolio_manager": ("portfolio_manager", "portfolio_analyst", "portfolio_analysis", "portfolio"),
+}
+
+
+def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize common model key aliases without inventing missing specialist evidence."""
+    if not isinstance(document, Mapping):
+        raise ValueError("AI response is not a JSON object")
+    normalized = dict(document)
+    containers = [
+        (key, document.get(key))
+        for key in _SPECIALIST_CONTAINER_ALIASES
+        if isinstance(document.get(key), Mapping)
+    ]
+    if not containers:
+        role_names = {alias for aliases in _SPECIALIST_ROLE_ALIASES.values() for alias in aliases}
+        specialists = {key: value for key, value in document.items() if key in role_names}
+        if not specialists:
+            raise ValueError("Required specialist views are missing")
+    else:
+        specialists = dict(containers[0][1])
+        for _, candidate in containers[1:]:
+            if dict(candidate) != specialists:
+                raise ValueError("Conflicting specialist view containers")
+    clean = {}
+    for canonical, aliases in _SPECIALIST_ROLE_ALIASES.items():
+        present = [(alias, specialists[alias]) for alias in aliases if alias in specialists]
+        if not present:
+            raise ValueError("Required specialist views are missing")
+        first_value = present[0][1]
+        if any(value != first_value for _, value in present[1:]):
+            raise ValueError("Conflicting aliases for a specialist role")
+        if not isinstance(first_value, Mapping):
+            raise ValueError("Invalid specialist view")
+        item = dict(first_value)
+        if canonical == "trader":
+            value_keys = ("proposal", "direction", "view", "verdict", "decision", "status")
+        elif canonical in {"risk_manager", "portfolio_manager"}:
+            value_keys = ("verdict", "decision", "view", "status")
+        else:
+            value_keys = ("view", "verdict", "stance", "decision", "status")
+        raw_value = next((item.get(key) for key in value_keys if item.get(key) not in (None, "")), None)
+        if not isinstance(raw_value, str):
+            raise ValueError("Invalid specialist verdict")
+        token = raw_value.strip().upper().replace("-", "_").replace(" ", "_")
+        token = {
+            "BULL": "BULLISH", "BEAR": "BEARISH", "SUPPORTS": "SUPPORT",
+            "AGAINST": "OPPOSE", "APPROVED": "APPROVE", "REJECTED": "REJECT",
+            "INSUFFICIENT": "INSUFFICIENT_DATA", "BUY": "LONG", "SELL": "SHORT",
+        }.get(token, token)
+        reason_keys = ("reason_fa", "reason", "analysis", "rationale", "explanation", "why")
+        reason = next((item.get(key) for key in reason_keys if isinstance(item.get(key), str) and item.get(key).strip()), None)
+        if not reason:
+            raise ValueError("Specialist explanation is missing")
+        if canonical == "trader":
+            item["proposal"] = token
+        elif canonical in {"risk_manager", "portfolio_manager"}:
+            item["verdict"] = token
+        else:
+            item["view"] = token
+        item["reason_fa"] = reason.strip()
+        clean[canonical] = item
+    normalized["specialist_views"] = clean
+    declared_decision = document.get("decision")
+    if declared_decision not in (None, ""):
+        if not isinstance(declared_decision, str):
+            raise ValueError("AI final decision is invalid")
+        decision = declared_decision.strip().upper().replace("-", "_").replace(" ", "_")
+        decision = {"APPROVED": "APPROVE", "REJECT": "VETO", "REJECTED": "VETO"}.get(decision, decision)
+        if decision not in {"APPROVE", "VETO", "INSUFFICIENT_DATA"}:
+            raise ValueError("AI final decision is invalid")
+        normalized["decision"] = decision
+    declared_direction = document.get("direction")
+    if declared_direction not in (None, ""):
+        if not isinstance(declared_direction, str):
+            raise ValueError("AI direction is invalid")
+        direction = declared_direction.strip().upper().replace("-", "_").replace(" ", "_")
+        direction = {"BULLISH": "LONG", "BEARISH": "SHORT", "BUY": "LONG", "SELL": "SHORT"}.get(direction, direction)
+        if direction not in {"LONG", "SHORT", "NO_TRADE"}:
+            raise ValueError("AI direction is invalid")
+        normalized["direction"] = direction
+    return normalized
+
+
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
+    document = _normalize_specialist_views(document)
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
         raise ValueError("Unknown final rating")
@@ -1412,6 +1522,14 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
         and trader_proposal == expected_side
         and not risk_flags
     )
+    declared_direction = document.get("direction")
+    if declared_direction and declared_direction != expected_side:
+        raise ValueError("AI direction conflicts with the expected trade side")
+    declared_decision = document.get("decision")
+    if declared_decision == "APPROVE" and not approved:
+        raise ValueError("AI approval conflicts with specialist risk validation")
+    if declared_decision in {"VETO", "INSUFFICIENT_DATA"}:
+        approved = False
     rationale = str(document.get("rationale_fa") or "")[:1_000]
     return {
         "provider": "OpenRouter",
@@ -1420,11 +1538,14 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
         "market_type": market_type,
         "expected_side": expected_side,
         "status": "APPROVED" if approved else (
-            "VETO" if rating.casefold() in ({"buy", "overweight"} if expected_side == "SHORT" else {"hold", "underweight", "sell"})
+            "VETO" if declared_decision == "VETO"
+            or rating.casefold() in ({"buy", "overweight"} if expected_side == "SHORT" else {"hold", "underweight", "sell"})
             or risk_verdict == "REJECT" or portfolio_verdict == "REJECT"
             or trader_proposal != expected_side or risk_flags
             else "UNKNOWN"
         ),
+        "declared_decision": declared_decision,
+        "declared_direction": declared_direction,
         "status_fa": "نظر AI برای ورود آزمایشی مساعد است." if approved else
             "نظر AI ورود آزمایشی را رد یا نامشخص اعلام کرد.",
         "final_rating": rating,
