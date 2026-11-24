@@ -78,9 +78,14 @@ class FastAssetScanTests(unittest.TestCase):
              patch.object(web_app, "run_with_hard_timeout", return_value=(True, report)), \
              patch.object(web_app.ENGINE, "analyze") as analyze:
             web_app._run_scan(job_id, asset, "", "")
-        self.assertEqual(web_app.JOBS[job_id]["status"], "completed")
-        self.assertTrue(web_app.JOBS[job_id]["result"]["fast_asset_scan"])
-        self.assertEqual(web_app.JOBS[job_id]["result"]["fast_scan"], report)
+        self.assertEqual(web_app.JOBS[job_id]["status"], "partial")
+        payload = web_app.JOBS[job_id]["result"]
+        self.assertEqual(payload["status"], "PARTIAL")
+        self.assertEqual(payload["signal"], "NO_TRADE")
+        self.assertIn("diagnosis", payload)
+        self.assertIn("timeframe_ranges", payload)
+        self.assertIn("market_overview", payload)
+        self.assertEqual(payload["market_overview"]["current_price"], "NOT_AVAILABLE")
         analyze.assert_not_called()
 
     def test_manual_scan_timeout_is_terminal_and_does_not_wait_for_engine(self):
