@@ -6283,16 +6283,17 @@ def _run_blofin_demo_execution_job(
             {
                 "instrument_id": instrument_id,
                 "signal": str(getattr(getattr(analysis, "signal", None), "value", getattr(analysis, "signal", "UNKNOWN"))),
-                "reviewers": ["nemotron", "second_ai"],
-                "review_contract": "Independent reviews run concurrently; neither receives the other's answer.",
-                "execution_role": "ENTRY_APPROVAL_GATE",
+                "reviewers": ["groq"],
+                "review_contract": "One live Groq review; deterministic evidence and executor risk gates remain mandatory.",
+                "execution_role": "SOLE_ENTRY_APPROVAL_REVIEWER",
             },
             event_key="ai-review-requested", experience_id=learning_experience_id,
-            reason="Two independent reviewer calls are starting before any Demo order decision.",
+            reason="The sole Groq reviewer is starting before any Demo order decision.",
         )
-        failed_operation = "ai_supervisors.request_and_validate_quorum"
+        failed_operation = "ai_supervisor.groq_request_and_validate"
         ai_quorum = _run_challenge1_supervisor_reviews(
             analysis, asset, signal_id=str(record.get("signal_id") or ""),
+            single_reviewer=True,
         )
         _record_challenge1_audit(
             job_id, "AI_REVIEW_RESULT",
