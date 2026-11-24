@@ -49,7 +49,6 @@ class Challenge1V2SingleGroqReviewerTests(unittest.TestCase):
                 analysis(), "perp:BTCUSDT",
                 primary_reviewer=lambda *_args, **_kwargs: primary_calls.append("nemotron"),
                 second_reviewer=lambda *_args, **_kwargs: groq_review,
-                single_reviewer=True,
             )
         self.assertEqual(primary_calls, [])
         return result
