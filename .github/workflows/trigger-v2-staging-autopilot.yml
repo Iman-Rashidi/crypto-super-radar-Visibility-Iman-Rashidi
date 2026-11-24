@@ -1,8 +1,10 @@
 name: challenge1-v2-demo-autopilot-scheduler
 
+# GitHub evaluates scheduled workflows from the repository default branch (main).
+# This dispatcher runs the actual worker on the protected Staging branch only.
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
