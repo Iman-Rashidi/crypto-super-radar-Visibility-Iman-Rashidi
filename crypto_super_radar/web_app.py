@@ -61,6 +61,7 @@ from .challenge1_v2_orchestration import (
 from .database import connect_database, connect_turso_database, storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
+from .ai_copilot import chat as ai_copilot_chat, CopilotError
 from .notion_event_sync import NotionEventOutbox
 from .notion_activity_journal import NotionActivityJournal
 from .challenge1_position_observers import (
