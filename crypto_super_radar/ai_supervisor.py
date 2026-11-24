@@ -490,33 +490,36 @@ def _configured_providers() -> list[dict[str, Any]]:
 
 
 def ai_supervisor_status() -> dict[str, Any]:
-    """Return the active Challenge 1 V2 Groq-only reviewer status without secrets."""
-    definition = next(item for item in _PROVIDER_DEFINITIONS if item["id"] == "groq")
-    configured = bool((os.getenv("GROQ_API_KEY") or "").strip())
-    provider = {
-        "id": "groq",
-        "provider": definition["label"],
-        "model": definition["model"],
-        "configured": configured,
-        "status": "CONFIGURED" if configured else "MISSING_API_KEY",
-        "key_variable": "GROQ_API_KEY",
-        "pricing_guard": definition["tier"],
-        "execution_role": "SOLE_CHALLENGE_1_V2_ENTRY_REVIEWER",
-    }
+    """Return non-secret status for the optional multi-provider AI configuration."""
+    configured_ids = {item["id"] for item in _configured_providers()}
+    states = []
+    for definition in _PROVIDER_DEFINITIONS:
+        ready = definition["id"] in configured_ids
+        states.append({
+            "id": definition["id"],
+            "provider": definition["label"],
+            "model": definition["model"],
+            "configured": ready,
+            "status": "CONFIGURED" if ready else "MISSING_API_KEY",
+            "key_variable": definition["env"],
+            "pricing_guard": definition["tier"],
+        })
+    count = len(configured_ids)
+    ready = count >= MIN_INDEPENDENT_APPROVALS
     return {
-        "provider": "Groq Sole Challenge 1 V2 Supervisor",
-        "model": definition["model"],
-        "status": "READY" if configured else "NOT_CONFIGURED",
+        "provider": "Independent Multi-Provider AI Supervisor",
+        "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+        "status": "READY" if ready else "INSUFFICIENT_PROVIDERS",
         "status_fa": (
-            "یک ناظر Groq با مدل و پاسخ زنده اعتبارسنجی‌شده فعال است؛ کنترل‌های قطعی استراتژی و Executor همچنان اجباری‌اند."
-            if configured else
-            "کلید Groq تنظیم نشده است؛ تأیید ورود و ارسال سفارش مسدود می‌ماند."
+            f"{count} ارائه‌دهنده تنظیم شده؛ حداقل دو مدل مستقل برای این مسیر اختیاری لازم است."
+            if ready else
+            f"فقط {count} ارائه‌دهنده تنظیم شده است؛ این مسیر اختیاری حداقل دو کلید مستقل می‌خواهد."
         ),
-        "configured": configured,
-        "configured_provider_count": int(configured),
-        "available_provider_count": 1,
-        "required_independent_approvals": 1,
-        "providers": [provider],
+        "configured": ready,
+        "configured_provider_count": count,
+        "available_provider_count": len(_PROVIDER_DEFINITIONS),
+        "required_independent_approvals": MIN_INDEPENDENT_APPROVALS,
+        "providers": states,
         "secret_sent_to_model": False,
         "orders_submitted": False,
         "paper_entry_eligible": False,
