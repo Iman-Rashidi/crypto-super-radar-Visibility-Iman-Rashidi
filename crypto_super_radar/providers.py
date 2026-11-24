@@ -653,6 +653,87 @@ class MarketDataService:
             raise DataProviderError("Top-of-book liquidity is available only for CEX Spot assets")
         return self.binance.order_book_top(asset.symbol)
 
+    def _fetch_cex_fallback_frames(self, symbol: str, interval: str = "1d", limit: int = 365) -> Dict[str, pd.DataFrame]:
+        """Fetch bounded OHLCV histories from independent public CEX feeds."""
+        from .live_market_radar import (
+            fetch_bybit_candles, fetch_kraken_candles, fetch_okx_candles,
+        )
+
+        frames: Dict[str, pd.DataFrame] = {}
+        errors: Dict[str, str] = {}
+        for name, fetcher in (
+            ("OKX", fetch_okx_candles),
+            ("Bybit", fetch_bybit_candles),
+            ("Kraken", fetch_kraken_candles),
+        ):
+            try:
+                frame = fetcher(self.http, symbol, interval, limit)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frames[name] = frame
+                else:
+                    errors[name] = "empty OHLCV response"
+            except Exception as exc:
+                errors[name] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        self._last_cex_fallback_errors = errors
+        return frames
+
+    def _cex_fallback_snapshot(self, asset: AssetSpec, reason: Exception) -> MarketSnapshot:
+        """Build a read-only, independently cross-validated snapshot without Binance."""
+        frames = self._fetch_cex_fallback_frames(asset.symbol, "1d", 365)
+        observations = []
+        for name, frame in frames.items():
+            if frame.empty:
+                continue
+            latest = frame.iloc[-1]
+            price = _positive_float(latest.get("close"))
+            base_volume = _safe_float(latest.get("volume"))
+            if price is None or base_volume is None:
+                continue
+            observations.append({
+                "provider": name,
+                "price": price,
+                # Daily base volume multiplied by its close is an estimate, not
+                # exchange-reported quote turnover. Keep that distinction explicit.
+                "volume_24h": base_volume * price,
+                "raw": {"last_candle": latest.to_dict(), "volume_basis": "daily_base_volume_times_close_estimate"},
+            })
+        if len(observations) < 2:
+            details = getattr(self, "_last_cex_fallback_errors", {})
+            raise DataProviderError(
+                f"Binance unavailable ({reason}); fewer than two independent CEX fallback feeds "
+                f"returned valid candles: {details}"
+            ) from reason
+        threshold = self.config.thresholds.provider_discrepancy_pct
+        best_pair = min(
+            ((a, b) for index, a in enumerate(observations) for b in observations[index + 1:]),
+            key=lambda pair: relative_difference_pct(pair[0]["price"], pair[1]["price"]),
+        )
+        a, b = best_pair
+        price_diff = relative_difference_pct(a["price"], b["price"])
+        if price_diff > threshold:
+            raise DataProviderError(
+                f"CEX fallback cross-validation rejected {asset.symbol}: "
+                f"{a['provider']}/{b['provider']} price discrepancy={price_diff:.3f}% "
+                f"(limit={threshold:.3f}%)"
+            )
+        return MarketSnapshot(
+            asset=asset,
+            price_usd=(a["price"] + b["price"]) / 2.0,
+            volume_24h_usd=min(a["volume_24h"], b["volume_24h"]),
+            liquidity_usd=None,
+            price_discrepancy_pct=price_diff,
+            volume_discrepancy_pct=None,
+            provider_a=a["provider"],
+            provider_b=b["provider"],
+            raw={
+                "provider_a": a["raw"], "provider_b": b["raw"],
+                "fallback": True,
+                "fallback_reason": f"{type(reason).__name__}: {str(reason)[:180]}",
+                "volume_24h_basis": "estimated_from_daily_base_volume_times_close",
+                "orders_submitted": False,
+            },
+        )
+
     def snapshot(self, asset: AssetSpec) -> MarketSnapshot:
         from concurrent.futures import ThreadPoolExecutor
         threshold = self.config.thresholds.provider_discrepancy_pct
@@ -673,10 +754,13 @@ class MarketDataService:
                     raise DataProviderError("Open interest is zero or unavailable")
                 name_a, name_b = a.get("provider", "Binance USD-M"), b.get("provider", "Bybit Linear")
             else:
-                future_a = executor.submit(self.binance.ticker, asset.symbol)
-                future_b = executor.submit(self.bybit.ticker, asset.symbol)
-                a, b = future_a.result(), future_b.result()
-                name_a, name_b = "Binance Spot", b.get("provider", "Bybit Spot")
+                try:
+                    future_a = executor.submit(self.binance.ticker, asset.symbol)
+                    future_b = executor.submit(self.bybit.ticker, asset.symbol)
+                    a, b = future_a.result(), future_b.result()
+                    name_a, name_b = "Binance Spot", b.get("provider", "Bybit Spot")
+                except (DataProviderError, requests.RequestException, TimeoutError) as exc:
+                    return self._cex_fallback_snapshot(asset, exc)
         price_diff = relative_difference_pct(a["price"], b["price"])
         # DEX providers describe the same token/pool universe, so both price
         # and volume are compared. CEX venues have different traded volumes by
@@ -720,7 +804,38 @@ class MarketDataService:
                 if not self.perpetual._binance_unavailable(exc):
                     raise
                 return self.perpetual.binance_candles(asset.symbol, limit=365)
-        return self.binance.candles(asset.symbol, interval="1d", limit=365)
+        try:
+            return self.binance.candles(asset.symbol, interval="1d", limit=365)
+        except (DataProviderError, requests.RequestException, TimeoutError) as exc:
+            frames = self._fetch_cex_fallback_frames(asset.symbol, "1d", 365)
+            if len(frames) < 2:
+                details = getattr(self, "_last_cex_fallback_errors", {})
+                raise DataProviderError(
+                    f"Binance OHLCV unavailable ({exc}); fewer than two independent "
+                    f"CEX fallback histories are valid: {details}"
+                ) from exc
+            # Prefer OKX, then Bybit, then Kraken; all available feeds have
+            # already been normalized by the shared live-radar adapters.
+            ordered = [frames[name] for name in ("OKX", "Bybit", "Kraken") if name in frames]
+            primary = ordered[0]
+            secondary = ordered[1]
+            common = primary[["close"]].join(
+                secondary[["close"]], how="inner", lsuffix="_primary", rsuffix="_secondary"
+            ).tail(5)
+            if common.empty:
+                raise DataProviderError("CEX fallback histories have no common candle timestamps") from exc
+            discrepancies = [
+                relative_difference_pct(float(row.close_primary), float(row.close_secondary))
+                for row in common.itertuples()
+            ]
+            max_discrepancy = max(discrepancies)
+            threshold = self.config.thresholds.provider_discrepancy_pct
+            if max_discrepancy > threshold:
+                raise DataProviderError(
+                    f"CEX fallback candle cross-validation failed: {max_discrepancy:.3f}% "
+                    f"(limit={threshold:.3f}%)"
+                ) from exc
+            return primary
 
     def benchmark_candles(self) -> pd.DataFrame:
         return self.binance.candles("BTCUSDT", interval="1d", limit=365)
