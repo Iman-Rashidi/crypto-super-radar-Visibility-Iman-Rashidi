@@ -18,8 +18,11 @@ class ScanResilienceTests(unittest.TestCase):
         return SimpleNamespace(
             gates=gates, metrics={}, signal=Signal.NO_TRADE,
             confirmation_score=40.0, estimated_risk_score=30.0,
-            opportunity_rank=25.0, summary_fa="تحلیل پژوهشی",
-            summary_en="Research only", safety_status=None,
+            opportunity_rank=25.0, expected_holding_days=5,
+            entry_price=None, stop_loss=None, take_profit=None,
+            position_notional_usd=None, risk_budget_usd=None,
+            summary_fa="تحلیل پژوهشی", summary_en="Research only",
+            safety_status=None,
         )
 
     def test_sentiment_and_market_intelligence_exceptions_do_not_abort_engine(self):
