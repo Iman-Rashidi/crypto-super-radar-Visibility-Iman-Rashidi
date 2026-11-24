@@ -131,7 +131,7 @@ class LiveChartUiTests(unittest.TestCase):
     def test_scan_gate_renderer_and_incomplete_data_are_persian(self):
         # Guard the regression fixed in Commit 300bcf5 and the Persian scan labels.
         self.assertIn("function renderGates(gates)", self.source)
-        self.assertIn("function statusFa", self.source)
+        self.assertIn("const statusFa=", self.source)
         self.assertIn("تحلیل نیمه‌کامل", self.source)
         self.assertIn("داده دریافت نشد", self.source)
         self.assertIn("فعلاً معامله نکن", self.source)
