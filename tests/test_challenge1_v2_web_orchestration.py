@@ -290,7 +290,7 @@ def approved_review(provider: str, model: str):
     def test_v2_orchestration_attaches_live_groq_review_and_executor_gate_accepts_it(self):
         self.record = make_v2_record(self.client.now_ms)
         nemotron = approved_review("OpenRouter", "nemotron/test-model")
-        groq = approved_review("Groq", "openai/gpt-oss-120b")
+        groq = approved_review("Groq", "openai/gpt-oss-20b")
         with (
             patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
             patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=nemotron) as reviewer_one,
@@ -450,7 +450,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
 
     def test_end_to_end_v2_dry_run_reaches_groq_reviewer_and_order_plan_without_order_write(self):
         review_one = approved_review("OpenRouter", "nemotron/test-model")
-        review_two = approved_review("Groq", "openai/gpt-oss-120b")
+        review_two = approved_review("Groq", "openai/gpt-oss-20b")
         with patch.dict(os.environ, {"BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true"}):
             with (
                 patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
@@ -525,7 +525,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "OpenRouter", "nemotron/test-model",
                 )),
                 patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
-                    "Groq", "openai/gpt-oss-120b",
+                    "Groq", "openai/gpt-oss-20b",
                 )),
             ):
                 web_app._run_blofin_demo_execution_job(
@@ -572,7 +572,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "OpenRouter", "nemotron/test-model",
                 )),
                 patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
-                    "Groq", "openai/gpt-oss-120b",
+                    "Groq", "openai/gpt-oss-20b",
                 )),
             ):
                 web_app._run_blofin_demo_execution_job(
