@@ -102,6 +102,25 @@ class ManagedProfitTop1Tests(unittest.TestCase):
             guarded.execute()
         self.assertEqual(delegate.calls, 1)
 
+    def test_single_entry_executor_consumes_attempt_even_when_executor_raises(self):
+        class FakeStore:
+            pass
+        class FailingExecutor:
+            store = FakeStore()
+            def __init__(self):
+                self.calls = 0
+            def execute(self, *_args, **_kwargs):
+                self.calls += 1
+                raise TimeoutError("unknown exchange outcome")
+        delegate = FailingExecutor()
+        guarded = _SingleEntryExecutor(delegate)
+        with self.assertRaises(TimeoutError):
+            guarded.execute()
+        self.assertTrue(guarded.entry_attempted)
+        with self.assertRaisesRegex(RuntimeError, "attempt limit"):
+            guarded.execute()
+        self.assertEqual(delegate.calls, 1)
+
     def test_multiple_ranked_no_entry_records_are_safe_to_retry(self):
         import json
         report = {
