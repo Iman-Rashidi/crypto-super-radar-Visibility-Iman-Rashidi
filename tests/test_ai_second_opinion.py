@@ -14,6 +14,7 @@ from crypto_super_radar.ai_second_opinion import (
     run_free_ai_second_opinion,
     run_independent_ai_supervisor,
     run_openrouter_connection_diagnostic,
+    _post_groq_with_rate_limit,
 )
 from crypto_super_radar.models import AssetSpec, Signal
 
@@ -1376,4 +1377,64 @@ class V2NestedSpecialistShapeTests(unittest.TestCase):
         self.assertIn("specialist_views", rendered)
         self.assertIn("risk_manager", rendered)
         self.assertNotIn("DO_NOT_LOG_THIS_TEXT", rendered)
+
+class GroqRateLimitPacingTests(unittest.TestCase):
+    def setUp(self):
+        import crypto_super_radar.ai_second_opinion as module
+        with module._GROQ_REQUEST_LOCK:
+            module._GROQ_LAST_REQUEST_STARTED = 0.0
+
+    def test_waits_2500ms_between_groq_request_starts(self):
+        response = SimpleNamespace(status_code=200)
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            return response
+
+        import crypto_super_radar.ai_second_opinion as module
+        with module._GROQ_REQUEST_LOCK:
+            module._GROQ_LAST_REQUEST_STARTED = module.time.monotonic()
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
+            result = _post_groq_with_rate_limit(
+                post, "https://api.groq.com/openai/v1/chat/completions",
+                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+            )
+        self.assertIs(result, response)
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(sleep.call_args.args[0], 2.5, places=1)
+
+    def test_retries_http_429_once_after_three_seconds(self):
+        responses = [SimpleNamespace(status_code=429), SimpleNamespace(status_code=200)]
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            return responses.pop(0)
+
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
+            result = _post_groq_with_rate_limit(
+                post, "https://api.groq.com/openai/v1/chat/completions",
+                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+            )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(unittest.mock.call(3.0), sleep.call_args_list)
+
+    def test_does_not_retry_a_second_http_429(self):
+        response = SimpleNamespace(status_code=429)
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            return response
+
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
+            result = _post_groq_with_rate_limit(
+                post, "https://api.groq.com/openai/v1/chat/completions",
+                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+            )
+        self.assertIs(result, response)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(unittest.mock.call(3.0), sleep.call_args_list)
 

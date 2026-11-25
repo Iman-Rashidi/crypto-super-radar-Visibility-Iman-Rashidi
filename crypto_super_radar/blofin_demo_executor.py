@@ -1590,7 +1590,12 @@ class BloFinDemoEventStore:
                     if lock_maximum != 1 or lock_consumed >= lock_maximum or lock_consumed < 0:
                         self._db.rollback()
                         return False
-                if single_shot:
+                # The lifetime one-shot lock remains available to legacy/manual
+                # execution only. V2 uses durable signal_id uniqueness, an active-
+                # instrument duplicate guard, and the account-wide four-slot cap.
+                # Never consume or re-check the legacy lifetime lock for V2.
+                legacy_single_shot = bool(single_shot and not v2_controls_enabled)
+                if legacy_single_shot:
                     if lock_row is None:
                         self._db.execute(
                             """INSERT INTO blofin_demo_single_shot_lock
@@ -1682,7 +1687,7 @@ class BloFinDemoEventStore:
                     "aggregate_risk_limit_usdt": _format_decimal(risk_cap),
                     "aggregate_margin_limit_usdt": _format_decimal(margin_cap),
                     "learning_experience_id_present": bool(plan.get("experience_id")),
-                    "single_shot_lock_claimed": bool(single_shot),
+                    "single_shot_lock_claimed": bool(legacy_single_shot),
                     "single_shot_max_lifetime_orders": 1 if single_shot else None,
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,

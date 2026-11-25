@@ -870,11 +870,17 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
                 self.assertEqual(plan["execution_profile"], "CHALLENGE_1_V2")
                 self.assertTrue(self.store.reserve_order(
                     plan, max_concurrent_positions=4, v2_autopilot=True,
+                    single_shot=True,
                 ))
             fifth = make_v2_plan("DOGE-USDT", 5)
             self.assertFalse(self.store.reserve_order(
                 fifth, max_concurrent_positions=4, v2_autopilot=True,
+                single_shot=True,
             ))
+        # The consumed legacy one-shot lock remains untouched by V2 reservations.
+        lock_status = self.store.single_shot_lock_status()
+        self.assertTrue(lock_status["locked"])
+        self.assertEqual(lock_status["consumed_orders"], 1)
 
     def test_v2_autopilot_rejects_duplicate_active_instrument(self):
         first_record = v2_signal_record()

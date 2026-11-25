@@ -22,6 +22,36 @@ import requests
 
 from .agent_council import build_native_agent_council_review
 
+# Serialize Groq calls in this process so a multi-symbol V2 cycle does not
+# burst requests into the provider. This limiter affects only the Groq reviewer.
+_GROQ_REQUEST_LOCK = threading.Lock()
+_GROQ_LAST_REQUEST_STARTED = 0.0
+_GROQ_MIN_INTERVAL_SECONDS = 2.5
+_GROQ_429_RETRY_DELAY_SECONDS = 3.0
+
+
+def _post_groq_with_rate_limit(
+    post, endpoint, *, headers, payload, timeout, allow_redirects,
+):
+    """Serialize Groq calls, pace starts, and retry one HTTP 429 exactly once."""
+    global _GROQ_LAST_REQUEST_STARTED
+    with _GROQ_REQUEST_LOCK:
+        for attempt in range(2):
+            elapsed = time.monotonic() - _GROQ_LAST_REQUEST_STARTED
+            wait = max(0.0, _GROQ_MIN_INTERVAL_SECONDS - elapsed)
+            if wait:
+                time.sleep(wait)
+            _GROQ_LAST_REQUEST_STARTED = time.monotonic()
+            response = post(
+                endpoint, headers=headers, json=payload,
+                timeout=timeout, allow_redirects=allow_redirects,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status != 429 or attempt == 1:
+                return response
+            time.sleep(_GROQ_429_RETRY_DELAY_SECONDS)
+        return response
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 # OpenRouter model fallbacks verified in its live public catalogue on 2026-11-24.
@@ -2255,14 +2285,14 @@ def run_independent_ai_supervisor(
     started = time.monotonic()
     response_started_at = datetime.now(timezone.utc).isoformat()
     try:
-        response = post(
-            endpoint,
+        response = _post_groq_with_rate_limit(
+            post, endpoint,
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
                 "X-Title": "CRYPTO SUPER RADAR Independent Second Supervisor",
             },
-            json=payload,
+            payload=payload,
             timeout=(8, 35),
             allow_redirects=False,
         )
