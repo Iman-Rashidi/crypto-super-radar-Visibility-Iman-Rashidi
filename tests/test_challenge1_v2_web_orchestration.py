@@ -548,7 +548,10 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         order = store.latest_order()
         self.assertEqual(order["status"], "FILLED")
         self.assertEqual(order["position_id"], trade_client.position_id)
-        self.assertTrue(store.single_shot_lock_status()["locked"])
+        # V2 execution must not consume the legacy lifetime one-shot lock.
+        lock_status = store.single_shot_lock_status()
+        self.assertFalse(lock_status["locked"])
+        self.assertEqual(lock_status["consumed_orders"], 0)
         close_store()
 
     def test_v2_write_flag_without_all_independent_safety_switches_stays_blocked(self):
