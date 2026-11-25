@@ -125,7 +125,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/crypto-super-radar-source.tar.xz
-          git commit -m "chore: refresh Render source bundle"
+          git commit -m "chore: refresh Render source bundle [skip-v2-demo]"
           if ! git push origin "HEAD:${branch}"; then
             echo "Staging advanced during archive publication. The next run for the new HEAD will rebuild and publish the archive."
             exit 0
