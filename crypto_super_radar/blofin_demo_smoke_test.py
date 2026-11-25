@@ -370,3 +370,12 @@ class BloFinDemoSmokeTestRunner:
         raise BloFinDemoExecutionUnknown(
             "BloFin accepted the close request, but a flat position could not be verified in time."
         )
+
+
+def run_blofin_demo_roundtrip_smoke(*, on_event=None) -> dict[str, Any]:
+    """Run the isolated, Demo-only BTC-USDT entry/SL-TP/fill/close roundtrip.
+
+    This is connectivity acceptance only. It deliberately does not represent a
+    CHALLENGE_1_V2 market signal or validate the strategy's entry gates.
+    """
+    return BloFinDemoSmokeTestRunner(on_event=on_event).run()
