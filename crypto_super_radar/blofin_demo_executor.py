@@ -1121,6 +1121,7 @@ class BloFinDemoEventStore:
                     entry_price REAL NOT NULL,
                     stop_loss REAL NOT NULL,
                     take_profit REAL NOT NULL,
+                    exchange_tp_required INTEGER NOT NULL DEFAULT 1,
                     leverage INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     exchange_order_id TEXT,
@@ -1153,6 +1154,7 @@ class BloFinDemoEventStore:
                 ("reserved_risk_usdt", "TEXT"),
                 ("reserved_margin_usdt", "TEXT"),
                 ("notional_usdt", "TEXT"),
+                ("exchange_tp_required", "INTEGER NOT NULL DEFAULT 1"),
             ):
                 if column_name not in order_columns:
                     self._db.execute(
@@ -1712,14 +1714,15 @@ class BloFinDemoEventStore:
                 self._db.execute(
                     """INSERT INTO blofin_demo_orders
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
-                     stop_loss, take_profit, leverage, status, exchange_order_id, experience_id,
+                     stop_loss, take_profit, exchange_tp_required, leverage, status, exchange_order_id, experience_id,
                      position_side, filled_size, critical_reason,
                      reserved_risk_usdt, reserved_margin_usdt, notional_usdt, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)""",
                     (
                         order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                         str(plan["quantity"]), float(plan["entry_reference_price"]),
-                        float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
+                        float(plan["stop_loss"]), float(plan["take_profit"]),
+                        int(bool(plan.get("exchange_tp_required", True))), int(plan["leverage"]),
                         str(plan.get("experience_id") or "") or None,
                         str(plan.get("position_side") or plan.get("position_side_long_short") or "net"),
                         _format_decimal(new_risk), _format_decimal(new_margin),
@@ -2673,7 +2676,7 @@ class BloFinDemoExecutor:
         side = str(order.get("side") or "").upper()
         expected_position_side = str(order.get("position_side") or "net").lower()
         expected_tp = str(order.get("take_profit") or "")
-        tp_required = bool(expected_tp)
+        tp_required = bool(order.get("exchange_tp_required", 1))
         expected_sl = str(order.get("stop_loss") or "")
         detail_position_id = str(detail.get("positionId") or "").strip()
         try:
@@ -3099,8 +3102,7 @@ class BloFinDemoExecutor:
         # protective SL is exchange-attached. Keep the strategy target in-memory for
         # cost validation, but omit it from the durable exchange-protection record.
         exchange_take_profit = None if is_challenge1_v2 else plan["take_profit"]
-        if is_challenge1_v2:
-            plan["take_profit"] = ""
+        plan["exchange_tp_required"] = not is_challenge1_v2
         position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
         plan["position_side"] = position_side
         if not self.store.reserve_order(
