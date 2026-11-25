@@ -1158,8 +1158,11 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
             raise ValueError("Only a USDT linear Demo perpetual order can be canceled.")
         details = self.get_order_detail(inst_id, client_order_id=client_order_id)
+        if isinstance(details, Mapping):
+            nested = details.get("data")
+            details = [nested] if isinstance(nested, Mapping) else nested if isinstance(nested, list) else [details]
         if not isinstance(details, list):
-            raise BloFinDemoResponseError("Order-detail response is not a list.")
+            raise BloFinDemoResponseError("Order-detail response has an unsupported shape.")
         exact = [row for row in details if isinstance(row, Mapping)
                  and str(row.get("instId") or "").upper() == inst_id
                  and str(row.get("clientOrderId") or "") == client_order_id]
@@ -1177,6 +1180,9 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             raise BloFinDemoExecutionUnknown("Limit-order state is ambiguous; cancellation is blocked.")
         receipt = self._post(self.CANCEL_ORDER_PATH, {"orderId": returned_order_id})
         after_rows = self.get_order_detail(inst_id, client_order_id=client_order_id)
+        if isinstance(after_rows, Mapping):
+            nested = after_rows.get("data")
+            after_rows = [nested] if isinstance(nested, Mapping) else nested if isinstance(nested, list) else [after_rows]
         if not isinstance(after_rows, list):
             raise BloFinDemoExecutionUnknown("Canceled limit order could not be read back.")
         after = [item for item in after_rows if isinstance(item, Mapping)

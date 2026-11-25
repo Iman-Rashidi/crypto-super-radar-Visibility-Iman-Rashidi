@@ -651,10 +651,10 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
 
     def test_cancel_order_reads_back_exact_client_id_then_posts_exchange_order_id(self):
         self.client.get_order_detail = Mock(side_effect=[
-            [{"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
-              "orderId":"exchange-order-7","state":"live"}],
-            [{"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
-              "orderId":"exchange-order-7","state":"canceled"}],
+            {"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
+             "orderId":"exchange-order-7","state":"live"},
+            {"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
+             "orderId":"exchange-order-7","state":"canceled"},
         ])
         result = self.client.cancel_order(
             inst_id="BTC-USDT", client_order_id="TIME12345678901234567890",
