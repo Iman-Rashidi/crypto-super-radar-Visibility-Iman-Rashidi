@@ -70,6 +70,7 @@ def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "signal_id", "ai_review", "second_ai_review", "ai_reviews", "ai_consensus",
         "ai_status", "ai_review_reason", "orders_submitted", "execution_result",
         "entry_skipped_reason", "mode", "exit_manager_summary",
+        "demo_entry_context", "easy_demo_entry_mode",
         "elliott_rejection_reason", "elliott_evidence_snapshot")
     return {key: record.get(key) for key in allowed if key in record}
 

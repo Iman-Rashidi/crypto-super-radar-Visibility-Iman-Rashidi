@@ -31,6 +31,32 @@ def _btc_master_guard_allows_entry(btc_aligned: bool) -> bool:
     return bool(btc_aligned) or _easy_demo_entry_enabled()
 
 
+def _easy_demo_entry_confirmation(direction: str, candle: Mapping[str, Any], rsi_value: float) -> dict[str, bool]:
+    """Confirm 1H EMA direction with a directional closed 15m candle and non-extreme RSI."""
+    side = str(direction or "").strip().upper()
+    try:
+        opened = float(candle["open"])
+        closed = float(candle["close"])
+        rsi = float(rsi_value)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {"confirmed": False, "candle_momentum": False, "rsi_aligned": False}
+    candle_momentum = (
+        closed > opened if side == "LONG"
+        else closed < opened if side == "SHORT"
+        else False
+    )
+    rsi_aligned = (
+        40.0 <= rsi <= 75.0 if side == "LONG"
+        else 25.0 <= rsi <= 60.0 if side == "SHORT"
+        else False
+    )
+    return {
+        "confirmed": bool(candle_momentum and rsi_aligned),
+        "candle_momentum": bool(candle_momentum),
+        "rsi_aligned": bool(rsi_aligned),
+    }
+
+
 def adx_meets_entry_threshold(value: float) -> bool:
     """Return whether the completed 1H ADX meets the V2 trend floor."""
     try:
@@ -1460,29 +1486,20 @@ def analyze_signal(
 
     if _easy_demo_entry_enabled():
         ema15_slope = float(e21.iloc[-1] - e21.iloc[-4])
-        ema15_aligned = (
+        ema15_slope_advisory = (
             float(last["close"]) > float(e21.iloc[-1]) and ema15_slope > 0
             if direction == "LONG" else
             float(last["close"]) < float(e21.iloc[-1]) and ema15_slope < 0
         )
-        candle_momentum = (
-            float(last["close"]) > float(last["open"]) and float(last["close"]) >= float(previous["close"])
-            if direction == "LONG" else
-            float(last["close"]) < float(last["open"]) and float(last["close"]) <= float(previous["close"])
-        )
-        rsi_aligned = (
-            45.0 <= rsi_value <= 70.0 if direction == "LONG"
-            else 30.0 <= rsi_value <= 55.0
-        )
-        if not (ema15_aligned and candle_momentum and rsi_aligned):
+        confirmation = _easy_demo_entry_confirmation(direction, last, rsi_value)
+        if not confirmation["confirmed"]:
             return {
                 "signal": "NO_TRADE",
-                "reason": "Easy Demo requires aligned 15m EMA21 slope, RSI range and closed-candle momentum",
+                "reason": "Easy Demo requires 1H EMA21 direction plus aligned 15m RSI and closed-candle body momentum",
                 "regime": regime,
                 "demo_entry_context": {
-                    "ema15_aligned": bool(ema15_aligned),
-                    "candle_momentum": bool(candle_momentum),
-                    "rsi_aligned": bool(rsi_aligned),
+                    **confirmation,
+                    "ema15_slope_advisory": bool(ema15_slope_advisory),
                     "rsi_15m": rsi_value,
                     "btc_master_aligned": bool(btc_ok),
                     "h4_opposed": bool(regime.get("opposed_4h")),
@@ -1490,9 +1507,8 @@ def analyze_signal(
             }
         score_parts = {
             "h1_close_vs_ema21": 35,
-            "m15_ema21_slope": 20,
-            "m15_candle_momentum": 25,
-            "m15_rsi_alignment": 15,
+            "m15_candle_momentum": 35,
+            "m15_rsi_alignment": 25,
             "h4_context_bonus": 3 if regime.get("aligned_4h") else 0,
             "btc_context_bonus": 2 if btc_ok else 0,
         }

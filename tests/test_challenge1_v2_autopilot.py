@@ -432,3 +432,32 @@ class Challenge1V2EasyDemoEntryModeTests(unittest.TestCase):
             "BLOFIN_DEMO_TRADING_ENABLED": "true",
         }):
             self.assertFalse(_btc_master_guard_allows_entry(False))
+
+
+class Challenge1V2EasyDemoIndicatorConfirmationTests(unittest.TestCase):
+    def test_long_uses_h1_ema_direction_with_m15_rsi_and_green_candle(self):
+        from crypto_super_radar.challenge1_v2 import _easy_demo_entry_confirmation
+        result = _easy_demo_entry_confirmation(
+            "LONG", {"open": 100.0, "close": 100.2}, 61.0
+        )
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["candle_momentum"])
+        self.assertTrue(result["rsi_aligned"])
+
+    def test_short_uses_m15_rsi_and_red_candle(self):
+        from crypto_super_radar.challenge1_v2 import _easy_demo_entry_confirmation
+        result = _easy_demo_entry_confirmation(
+            "SHORT", {"open": 100.2, "close": 100.0}, 44.0
+        )
+        self.assertTrue(result["confirmed"])
+
+    def test_flat_candle_or_extreme_rsi_does_not_create_entry(self):
+        from crypto_super_radar.challenge1_v2 import _easy_demo_entry_confirmation
+        flat = _easy_demo_entry_confirmation(
+            "LONG", {"open": 100.0, "close": 100.0}, 60.0
+        )
+        overbought = _easy_demo_entry_confirmation(
+            "LONG", {"open": 100.0, "close": 100.2}, 82.0
+        )
+        self.assertFalse(flat["confirmed"])
+        self.assertFalse(overbought["confirmed"])
