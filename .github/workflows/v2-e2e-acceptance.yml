@@ -24,7 +24,7 @@ jobs:
       BLOFIN_DEMO_TRADE_API_SECRET: ${{ secrets.BLOFIN_DEMO_TRADE_API_SECRET }}
       BLOFIN_DEMO_TRADE_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_TRADE_PASSPHRASE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      CSR_ACCEPTANCE_REPORT: ${{ runner.temp }}/v2-e2e-acceptance-report.json
+      CSR_ACCEPTANCE_REPORT: ${{ github.workspace }}/v2-e2e-acceptance-report.json
     steps:
       - name: Checkout exact Staging commit
         uses: actions/checkout@v4
@@ -56,6 +56,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: v2-e2e-acceptance-${{ github.run_id }}
-          path: ${{ runner.temp }}/v2-e2e-acceptance-report.json
+          path: ${{ github.workspace }}/v2-e2e-acceptance-report.json
           if-no-files-found: ignore
           retention-days: 30
