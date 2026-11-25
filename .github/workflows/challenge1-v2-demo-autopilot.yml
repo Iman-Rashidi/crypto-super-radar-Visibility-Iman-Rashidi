@@ -1,4 +1,5 @@
 name: Challenge 1 V2 Demo autopilot worker
+# Post-deploy Staging validation trigger; no runtime behavior change.
 
 on:
   push:
