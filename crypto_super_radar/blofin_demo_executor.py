@@ -2748,7 +2748,7 @@ class BloFinDemoExecutor:
                 continue
             if str(row.get("state") or "").lower() != "live":
                 continue
-remove client order id requirement            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
             if not raw_sizes or any(not self._same_decimal(v, filled_size, "tpsl_size") for v in raw_sizes):
                 continue
             row_tp, row_sl = row.get("tpTriggerPrice"), row.get("slTriggerPrice")
