@@ -153,8 +153,8 @@ def signal_record(**overrides):
             "reviewer_id": "second_ai",
             "review": {
                 "reviewer_id": "second_ai", "provider": "Groq",
-                "model": "openai/gpt-oss-120b",
-                "returned_model": "openai/gpt-oss-120b",
+                "model": "openai/gpt-oss-20b",
+                "returned_model": "openai/gpt-oss-20b",
                 "status": "APPROVED", "paper_entry_eligible": True,
                 "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": True, "model_verified": True,
@@ -282,8 +282,8 @@ def v2_signal_record(**overrides):
     reviewed_at = datetime.now(timezone.utc).isoformat()
     groq_review = {
         "reviewer_id": "groq", "provider": "Groq",
-        "model": "openai/gpt-oss-120b",
-        "returned_model": "openai/gpt-oss-120b",
+        "model": "openai/gpt-oss-20b",
+        "returned_model": "openai/gpt-oss-20b",
         "status": "APPROVED", "paper_entry_eligible": True,
         "request_attempted": True, "response_source": "LIVE_API",
         "response_validated": True, "model_verified": True,
