@@ -2021,10 +2021,10 @@ def run_free_ai_second_opinion(
         def validate_candidate(document):
             return (
                 _validated_v2_review(
-                    document, request_model, asset_name, expected_side=expected_side, evidence=evidence,
+                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
                 )
                 if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-                else _validated_pattern_review(document, request_model, asset_name, evidence=evidence)
+                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
                 if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
                 else _validated_review(
                     document, model, asset_name, expected_side=expected_side, market_type=market_type
@@ -2363,7 +2363,7 @@ def run_independent_ai_supervisor(
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
-        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+        if returned_model.strip().split(":", 1)[0] != request_model.split(":", 1)[0]:
             return {
                 "reviewer_id": "second_ai", "provider": provider, "model": request_model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
@@ -2378,10 +2378,10 @@ def run_independent_ai_supervisor(
         def validate_candidate(document):
             return (
                 _validated_v2_review(
-                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
+                    document, request_model, asset_name, expected_side=expected_side, evidence=evidence,
                 )
                 if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
+                else _validated_pattern_review(document, request_model, asset_name, evidence=evidence)
                 if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
                 else _validated_review(
                     document, request_model, asset_name, expected_side=expected_side, market_type=market_type,
