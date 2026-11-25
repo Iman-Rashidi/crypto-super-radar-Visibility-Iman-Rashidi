@@ -861,7 +861,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
 
     def place_futures_order(
         self, *, inst_id: str, side: str, position_side: str, size: str,
-        client_order_id: str, take_profit: str, stop_loss: str,
+        client_order_id: str, take_profit: str | None, stop_loss: str,
         margin_mode: str = "isolated",
     ) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z0-9]{1,32}", client_order_id or ""):
@@ -871,10 +871,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if margin_mode not in {"isolated", "cross"}:
             raise ValueError("margin_mode must be isolated or cross.")
         qty = _decimal(size, "size")
-        tp = _decimal(take_profit, "take_profit")
+        tp = None if take_profit in (None, "") else _decimal(take_profit, "take_profit")
         sl = _decimal(stop_loss, "stop_loss")
-        if min(qty, tp, sl) <= 0:
-            raise ValueError("Order size and TP/SL prices must be positive.")
+        if qty <= 0 or sl <= 0 or (tp is not None and tp <= 0):
+            raise ValueError("Order size and supplied TP/SL prices must be positive.")
         body = {
             "instId": inst_id,
             "marginMode": margin_mode,
@@ -883,13 +883,12 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             "orderType": "market",
             "size": _format_decimal(qty),
             "clientOrderId": client_order_id,
-            "tpTriggerPrice": _format_decimal(tp),
-            "tpOrderPrice": "-1",
-            "tpTriggerPriceType": "mark",
             "slTriggerPrice": _format_decimal(sl),
             "slOrderPrice": "-1",
             "slTriggerPriceType": "mark",
         }
+        if tp is not None:
+            body.update({"tpTriggerPrice": _format_decimal(tp), "tpOrderPrice": "-1", "tpTriggerPriceType": "mark"})
         return self._post(self.ORDER_PATH, body)
 
     def close_futures_position(
@@ -2674,6 +2673,7 @@ class BloFinDemoExecutor:
         side = str(order.get("side") or "").upper()
         expected_position_side = str(order.get("position_side") or "net").lower()
         expected_tp = str(order.get("take_profit") or "")
+        tp_required = bool(expected_tp)
         expected_sl = str(order.get("stop_loss") or "")
         detail_position_id = str(detail.get("positionId") or "").strip()
         try:
@@ -2755,10 +2755,11 @@ class BloFinDemoExecutor:
             if tp_verified or sl_verified:
                 matched_rows += 1
         return {
-            "verified": tp_verified and sl_verified,
-            "reason": "VERIFIED" if tp_verified and sl_verified else "TP_OR_SL_MISSING_OR_MISMATCHED",
+            "verified": sl_verified and (tp_verified if tp_required else True),
+            "reason": ("VERIFIED" if sl_verified and (tp_verified if tp_required else True)
+                       else "TP_OR_SL_MISSING_OR_MISMATCHED" if tp_required else "SL_MISSING_OR_MISMATCHED"),
             "position_id": position_id, "tp_verified": tp_verified,
-            "sl_verified": sl_verified, "matched_tpsl_rows": matched_rows,
+            "tp_required": tp_required, "sl_verified": sl_verified, "matched_tpsl_rows": matched_rows,
             "filled_size": _format_decimal(filled_size),
         }
 
@@ -3094,6 +3095,12 @@ class BloFinDemoExecutor:
         plan = apply_demo_execution_cost_gate(
             plan, instrument, market_quote, policy=self.policy,
         )
+        # CHALLENGE_1_V2 manages TP1 in manage_open_positions(); only the full-size
+        # protective SL is exchange-attached. Keep the strategy target in-memory for
+        # cost validation, but omit it from the durable exchange-protection record.
+        exchange_take_profit = None if is_challenge1_v2 else plan["take_profit"]
+        if is_challenge1_v2:
+            plan["take_profit"] = ""
         position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
         plan["position_side"] = position_side
         if not self.store.reserve_order(
@@ -3137,7 +3144,7 @@ class BloFinDemoExecutor:
                     position_side=position_side,
                     size=plan["quantity"],
                     client_order_id=plan["client_order_id"],
-                    take_profit=plan["take_profit"],
+                    take_profit=exchange_take_profit,
                     stop_loss=plan["stop_loss"],
                     margin_mode="isolated",
                 )
