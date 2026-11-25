@@ -356,7 +356,7 @@ def run_challenge1_v2_supervisor_reviews(
 
     provider_name = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
     allowed_groq_models = {
-        "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+        "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
     }
     configured_model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
@@ -383,7 +383,6 @@ def run_challenge1_v2_supervisor_reviews(
     provider_id = str(groq.get("provider_id") or "").strip().casefold()
     provider_is_groq = provider_value in {"groq", "groqcloud"} or provider_id in {"groq", "groqcloud"}
     allowed_groq_models = {
-        "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
         "qwen/qwen3.8-27b",
     }
