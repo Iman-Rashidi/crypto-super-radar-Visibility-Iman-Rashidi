@@ -1810,6 +1810,7 @@ def _candidate_shape_diagnostic(document: Any) -> dict[str, Any]:
 
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
     document = _normalize_specialist_views(document)
+    expected_side = _normalize_v2_side(expected_side)
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
         raise ValueError("Unknown final rating")
@@ -1859,7 +1860,7 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
 
     risk_verdict = str((specialists["risk_manager"] or {}).get("verdict") or "").upper()
     portfolio_verdict = str((specialists["portfolio_manager"] or {}).get("verdict") or "").upper()
-    trader_proposal = str((specialists["trader"] or {}).get("proposal") or "").upper()
+    trader_proposal = _normalize_v2_side((specialists["trader"] or {}).get("proposal"))
     supporting_ratings = {"sell", "underweight"} if expected_side == "SHORT" else {"buy", "overweight"}
     approved = (
         rating.casefold() in supporting_ratings
@@ -1869,7 +1870,7 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
         and not risk_flags
     )
     declared_direction = document.get("direction")
-    if declared_direction and declared_direction != expected_side:
+    if declared_direction and _normalize_v2_side(declared_direction) != expected_side:
         raise ValueError("AI direction conflicts with the expected trade side")
     declared_decision = document.get("decision")
     if declared_decision == "APPROVE" and not approved:
