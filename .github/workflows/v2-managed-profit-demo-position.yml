@@ -15,6 +15,7 @@ on:
       - "tests/test_challenge1_v2_autopilot.py"
       - "tests/test_challenge1_v2_web_orchestration.py"
       - "tests/test_v2_managed_profit_demo_position.py"
+  workflow_dispatch:
 
 permissions:
   contents: read
