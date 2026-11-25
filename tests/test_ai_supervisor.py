@@ -106,7 +106,7 @@ class MultiProviderSupervisorTests(unittest.TestCase):
             elif "googleapis.com" in url:
                 model = "gemini-3.8-flash"
             else:
-                model = "openai/gpt-oss-120b"
+                model = "openai/gpt-oss-20b"
             return MultiProviderAIApproval(model, valid_document())
 
         with patch.dict(os.environ, {
