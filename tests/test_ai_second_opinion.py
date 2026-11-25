@@ -1552,3 +1552,66 @@ class GroqRateLimitPacingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V2WaveNormalizationRegressionTests(unittest.TestCase):
+    def _document(self):
+        doc = valid_document(
+            rating="Sell", risk_verdict="APPROVE",
+            portfolio_verdict="APPROVE", proposal="SHORT",
+        )
+        doc["wave_analyst"] = {
+            "verdict": "support", "phase": "Wave 4 Confirmed",
+            "direction": "downtrend", "reason_fa": "موج مستقل با شواهد همسو است.",
+        }
+        return doc
+
+    def _validate(self, doc):
+        from crypto_super_radar.ai_second_opinion import _validated_v2_review
+        return _validated_v2_review(
+            doc, "openai/gpt-oss-20b", "perp:BTCUSDT", expected_side="short",
+            evidence={"elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"}},
+        )
+
+    def test_normalizes_phase_direction_and_side_synonyms(self):
+        from crypto_super_radar.ai_second_opinion import (
+            _normalize_v2_phase, _normalize_v2_direction, _normalize_v2_side,
+        )
+        self.assertEqual(_normalize_v2_phase(" Wave 3 Confirmed "), "WAVE_3_CONFIRMED")
+        self.assertEqual(_normalize_v2_phase("waves 1 and 2 confirmed"), "WAVES_1_AND_2_CONFIRMED")
+        self.assertEqual(_normalize_v2_direction("downtrend"), "BEARISH")
+        self.assertEqual(_normalize_v2_direction("bullish"), "BULLISH")
+        self.assertEqual(_normalize_v2_side(" short "), "SHORT")
+
+    def test_approved_review_can_fill_omitted_wave_echo_from_deterministic_evidence(self):
+        doc = self._document()
+        doc["wave_analyst"].pop("phase")
+        doc["wave_analyst"].pop("direction")
+        doc["expected_side"] = "short"
+        result = self._validate(doc)
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["elliott_wave_phase"], "WAVE_4_CONFIRMED")
+        self.assertEqual(result["elliott_wave_direction"], "BEARISH")
+        self.assertEqual(result["expected_side"], "SHORT")
+        self.assertEqual(result["wave_echo_source"], "INPUT_EVIDENCE_FALLBACK")
+
+    def test_conflicting_wave_direction_still_fails_closed(self):
+        doc = self._document()
+        doc["wave_analyst"]["direction"] = "uptrend"
+        with self.assertRaisesRegex(ValueError, "V2 Elliott phase/direction"):
+            self._validate(doc)
+
+    def test_v2_prompt_exposes_exact_top_level_contract(self):
+        from crypto_super_radar.ai_second_opinion import _v2_prompt_messages
+        messages = _v2_prompt_messages({
+            "expected_side": "SHORT",
+            "execution_profile": "CHALLENGE_1_V2",
+            "review_mode": "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW",
+            "elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"},
+        })
+        prompt = messages[0]["content"]
+        self.assertIn('"elliott_wave_phase":"WAVE_4_CONFIRMED"', prompt)
+        self.assertIn('"elliott_wave_direction":"BEARISH"', prompt)
+        self.assertIn('"expected_side":"SHORT"', prompt)
+
+
