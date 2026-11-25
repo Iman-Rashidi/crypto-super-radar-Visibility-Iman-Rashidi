@@ -1688,7 +1688,7 @@ class BloFinDemoEventStore:
                     "aggregate_margin_limit_usdt": _format_decimal(margin_cap),
                     "learning_experience_id_present": bool(plan.get("experience_id")),
                     "single_shot_lock_claimed": bool(legacy_single_shot),
-                    "single_shot_max_lifetime_orders": 1 if single_shot else None,
+                    "single_shot_max_lifetime_orders": 1 if legacy_single_shot else None,
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
