@@ -1,0 +1,63 @@
+name: BloFin Demo emergency position reconciliation
+
+on:
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - scripts/v2_demo_emergency_reconcile.py
+      - .github/workflows/v2-demo-emergency-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blofin-demo-emergency-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      BLOFIN_DEMO_TRADING_ENABLED: "true"
+      BLOFIN_DEMO_TRADE_API_KEY: ${{ secrets.BLOFIN_DEMO_TRADE_API_KEY }}
+      BLOFIN_DEMO_TRADE_API_SECRET: ${{ secrets.BLOFIN_DEMO_TRADE_API_SECRET }}
+      BLOFIN_DEMO_TRADE_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_TRADE_PASSPHRASE }}
+    steps:
+      - name: Checkout exact Staging commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile emergency reconciliation utility
+        run: python -m compileall -q scripts/v2_demo_emergency_reconcile.py crypto_super_radar/blofin_demo_executor.py
+      - name: Verify Demo-only secrets without printing them
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in TURSO_DATABASE_URL TURSO_AUTH_TOKEN BLOFIN_DEMO_TRADE_API_KEY BLOFIN_DEMO_TRADE_API_SECRET BLOFIN_DEMO_TRADE_PASSPHRASE; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required Demo secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+      - name: Reconcile and close only exact unprotected Demo positions
+        run: python -m scripts.v2_demo_emergency_reconcile | tee "${RUNNER_TEMP}/v2-demo-emergency-reconcile.json"
+      - name: Upload non-secret emergency reconciliation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-demo-emergency-reconcile-${{ github.run_id }}
+          path: ${{ runner.temp }}/v2-demo-emergency-reconcile.json
+          if-no-files-found: ignore
+          retention-days: 30
