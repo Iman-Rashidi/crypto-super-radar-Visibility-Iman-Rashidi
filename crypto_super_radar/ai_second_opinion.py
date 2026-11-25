@@ -34,6 +34,11 @@ GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
 
 
+def normalize_groq_model_id(value: Any) -> str:
+    """Normalize Groq model IDs by dropping server-added revision suffixes."""
+    return str(value or "").strip().split(":", 1)[0].casefold()
+
+
 def _post_groq_with_rate_limit(
     post, endpoint, *, headers, payload, timeout, allow_redirects,
 ):
@@ -1558,7 +1563,7 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 "model_verified": False, "latency_ms": latency_ms,
                 "paper_entry_eligible": False,
             }
-        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+        if normalize_groq_model_id(returned_model) != normalize_groq_model_id(model):
             return {
                 "provider": "OpenRouter", "model": model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
@@ -1693,12 +1698,16 @@ def _validated_v2_review(
             raise ValueError("Groq expected-side echo conflicts with the requested trade direction")
         if wave_verdict and wave_verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN", "UNKNOWN", "INSUFFICIENT_DATA"}:
             raise ValueError("Easy Demo Elliott advisory verdict is malformed")
+    if easy_demo_entry and (not supplied_phase or not supplied_direction):
+        raise ValueError("Easy Demo Groq approval must include normalized Elliott advisory values")
+    approved_phase = supplied_phase if easy_demo_entry else expected_phase
+    approved_direction = supplied_direction if easy_demo_entry else expected_direction
     result.update({
-        "elliott_wave_phase": expected_phase,
-        "elliott_wave_direction": expected_direction,
+        "elliott_wave_phase": approved_phase,
+        "elliott_wave_direction": approved_direction,
         "expected_side": expected_side,
         "wave_echo_source": (
-            "ADVISORY_CONTEXT" if easy_demo_entry else
+            "MODEL_ADVISORY" if easy_demo_entry else
             "MODEL_ECHO" if phase_was_echoed and direction_was_echoed
             else "PARTIAL_MODEL_ECHO_WITH_INPUT_EVIDENCE" if phase_was_echoed or direction_was_echoed
             else "INPUT_EVIDENCE_FALLBACK"
@@ -2618,7 +2627,7 @@ def run_independent_ai_supervisor(
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
-        if returned_model.strip().split(":", 1)[0] != request_model.split(":", 1)[0]:
+        if normalize_groq_model_id(returned_model) != normalize_groq_model_id(request_model):
             return {
                 "reviewer_id": "second_ai", "provider": provider, "model": request_model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
@@ -3012,7 +3021,7 @@ def _call_challenge1_observer(
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": "RETURNED_MODEL_MISSING",
             }
-        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+        if normalize_groq_model_id(returned_model) != normalize_groq_model_id(model):
             return {
                 "reviewer_id": reviewer_id, "provider": provider, "model": model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",

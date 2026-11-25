@@ -6,7 +6,7 @@ adapter before these plans can authorize trading.
 """
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping, Sequence
 
 
@@ -47,6 +47,7 @@ def plan_v2_position_exit(
     lot_size: Any,
     min_size: Any,
     fee_rate_per_side: Any,
+    tick_size: Any | None = None,
 ) -> dict[str, Any]:
     """Return an idempotency-friendly TP1/TIME_EXIT action plan, never an order.
 
@@ -64,11 +65,12 @@ def plan_v2_position_exit(
         lot = Decimal(str(lot_size))
         minimum = Decimal(str(min_size))
         fee = Decimal(str(fee_rate_per_side))
+        tick = None if tick_size in (None, "") else Decimal(str(tick_size))
     except Exception as exc:
         raise V2PositionControlBlocked("Position exit inputs are incomplete.") from exc
     if side not in {"LONG", "SHORT"} or min(entry, stop, size, price, lot, minimum) <= 0:
         raise V2PositionControlBlocked("Position exit inputs are invalid.")
-    if fee < 0 or fee > Decimal("0.01") or bars_since_entry < 0:
+    if fee < 0 or fee > Decimal("0.01") or bars_since_entry < 0 or (tick is not None and tick <= 0):
         raise V2PositionControlBlocked("Fee rate or candle age is invalid.")
     risk = entry - stop if side == "LONG" else stop - entry
     if risk <= 0:
@@ -94,6 +96,9 @@ def plan_v2_position_exit(
     if not already_taken and bars_since_entry >= 12:
         fee_adjustment = (entry * fee * Decimal("2")) / (Decimal("1") - fee)
         net_be = entry + fee_adjustment if side == "LONG" else entry - fee_adjustment
+        if tick is not None:
+            rounding = ROUND_FLOOR if side == "LONG" else ROUND_CEILING
+            net_be = (net_be / tick).to_integral_value(rounding=rounding) * tick
         return {
             "action": "TIME_EXIT_LIMIT_AT_NET_BREAK_EVEN",
             "limit_price": str(net_be.normalize()),

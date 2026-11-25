@@ -369,22 +369,60 @@ class BloFinDemoV2OrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["take_profit"], "106")
         self.assertLessEqual(Decimal(plan["reserved_risk_usdt"]), Decimal("2.5"))
 
-    def test_v2_sizing_uses_half_percent_risk_and_caps_notional_at_5000_usdt(self):
+    def test_v2_sizing_reserves_one_quarter_margin_per_slot(self):
         policy = BloFinDemoRiskPolicy(
-            risk_per_trade_pct=0.005,
-            max_margin_usage_pct=0.10,
-            max_position_notional_usdt=5000.0,
-            max_leverage=1,
-            max_concurrent_positions=4,
+            risk_per_trade_pct=0.0025, daily_loss_limit_pct=0.02,
+            max_margin_usage_pct=0.25, max_aggregate_risk_pct=0.01,
+            max_position_notional_usdt=5000.0, max_leverage=3,
+            max_concurrent_positions=4, min_reward_risk=1.4,
         )
         plan = build_demo_order_plan(
             v2_signal_record(), instrument_record(), inst_id="BTC-USDT",
-            equity_usdt=100000, leverage=1, policy=policy,
+            equity_usdt=100000, leverage=2, policy=policy,
         )
-        self.assertEqual(plan["risk_budget_usdt"], 500.0)
-        self.assertEqual(plan["notional_usdt"], 5000.0)
-        self.assertEqual(plan["max_position_notional_usdt"], 5000.0)
-        self.assertEqual(plan["leverage"], 1)
+        self.assertEqual(plan["risk_budget_usdt"], 250.0)
+        self.assertEqual(plan["per_position_margin_budget_usdt"], "6250")
+        self.assertEqual(plan["leverage"], 2)
+        self.assertEqual(plan["aggregate_margin_limit_usdt"], "25000")
+
+    def test_btc_contract_quantity_is_even_lot_and_half_is_exchange_valid(self):
+        policy = BloFinDemoRiskPolicy(
+            risk_per_trade_pct=0.0025, max_margin_usage_pct=0.25,
+            max_aggregate_risk_pct=0.01, max_concurrent_positions=4,
+            max_leverage=3, min_reward_risk=1.4,
+        )
+        specs = instrument_record(contractValue="0.001", lotSize="0.1", minSize="0.1")
+        plan = build_demo_order_plan(v2_signal_record(), specs, inst_id="BTC-USDT",
+                                     equity_usdt=1000, leverage=2, policy=policy)
+        quantity = Decimal(plan["quantity"])
+        lot = Decimal("0.1")
+        self.assertEqual(quantity % (lot * 2), Decimal("0"))
+        self.assertEqual((quantity / 2) % lot, Decimal("0"))
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            build_demo_order_plan(v2_signal_record(), specs, inst_id="BTC-USDT",
+                                  equity_usdt=0.1, leverage=2, policy=policy)
+
+    def test_easy_demo_accepts_groq_normalized_ambiguous_wave_but_strict_mode_blocks(self):
+        record = v2_signal_record()
+        wave = record["challenge1_v2_evidence"]["elliott_wave"]
+        wave.update(phase="NO_RULE_VALID_IMPULSE", pattern="AMBIGUOUS", wave_alignment="UNCONFIRMED")
+        review = record["ai_reviews"][0]["review"]
+        review.update(elliott_wave_phase="WAVE_3_CONFIRMED", elliott_wave_direction="BULLISH",
+                       returned_model="openai/gpt-oss-20b:active-revision")
+        record["ai_consensus"].update(elliott_wave_phase="WAVE_3_CONFIRMED",
+                                      elliott_wave_direction="BULLISH")
+        with patch.dict(os.environ, {"BLOFIN_DEMO_TRADING_ENABLED":"true",
+                                     "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE":"true"}):
+            with patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
+                       return_value=(True,"mock evidence")):
+                ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertTrue(ready, reason)
+        with patch.dict(os.environ, {"BLOFIN_DEMO_TRADING_ENABLED":"true",
+                                     "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE":"false"}):
+            with patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
+                       return_value=(True,"mock evidence")):
+                ready, _ = _challenge1_two_reviewer_approval_ready(record)
+        self.assertFalse(ready)
 
     def test_v2_plan_rejects_missing_or_unsupported_funding_proof(self):
         for field, value in (("funding_kind", None), ("funding_kind", "1"),
@@ -590,6 +628,41 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self.assertEqual(payload["slTriggerPrice"], "98")
         self.assertEqual(payload["slOrderPrice"], "-1")
         self.assertEqual(payload["slTriggerPriceType"], "mark")
+
+    def test_market_reduce_only_exit_uses_exact_isolated_net_position(self):
+        self.client.get_position_mode = Mock(return_value={"positionMode":"net_mode"})
+        self.client.get_positions = Mock(return_value=[{
+            "instId":"BTC-USDT","positionId":"position-1","positionSide":"net",
+            "positions":"2.0","marginMode":"isolated",
+        }])
+        self.client.get_tradable_instrument = Mock(return_value=instrument_record())
+        receipt = self.client.place_market_exit_reduce_only(
+            inst_id="BTC-USDT", client_order_id="TMKT12345678901234567890",
+            position_id="position-1",
+        )
+        self.assertEqual(receipt["data"]["orderId"], "demo-order-1")
+        payload = json.loads(self.session.post.call_args.kwargs["data"])
+        self.assertEqual(payload["orderType"], "market")
+        self.assertEqual(payload["reduceOnly"], "true")
+        self.assertEqual(payload["size"], "2")
+        self.assertEqual(payload["side"], "sell")
+        self.assertEqual(payload["marginMode"], "isolated")
+        self.assertNotIn("positionId", payload)
+
+    def test_cancel_order_reads_back_exact_client_id_then_posts_exchange_order_id(self):
+        self.client.get_order_detail = Mock(side_effect=[
+            [{"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
+              "orderId":"exchange-order-7","state":"live"}],
+            [{"instId":"BTC-USDT","clientOrderId":"TIME12345678901234567890",
+              "orderId":"exchange-order-7","state":"canceled"}],
+        ])
+        result = self.client.cancel_order(
+            inst_id="BTC-USDT", client_order_id="TIME12345678901234567890",
+            order_id="exchange-order-7",
+        )
+        self.assertEqual(result["status"], "CANCELED")
+        self.assertTrue(self.session.post.call_args.args[0].endswith("/api/v1/trade/cancel-order"))
+        self.assertEqual(json.loads(self.session.post.call_args.kwargs["data"]), {"orderId":"exchange-order-7"})
 
     def test_set_leverage_is_capped_at_three_and_uses_isolated_margin(self):
         self.client.set_futures_leverage("BTC-USDT", 3, position_side="long")

@@ -16,8 +16,7 @@ from typing import Any, Callable
 import requests
 
 from . import ai_second_opinion as _ai
-
-GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
+from .ai_second_opinion import GROQ_ALLOWED_MODELS, normalize_groq_model_id
 
 MIN_INDEPENDENT_APPROVALS = 2
 MAX_PROVIDER_CALLS_PER_UTC_DAY = 30
@@ -416,10 +415,13 @@ def run_challenge1_v2_supervisor_reviews(
     allowed_groq_models = GROQ_ALLOWED_MODELS
     configured_model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
+    configured_model_id = normalize_groq_model_id(configured_model)
+    returned_model_id = normalize_groq_model_id(returned_model)
+    allowed_model_ids = {normalize_groq_model_id(item) for item in allowed_groq_models}
     verified = bool(
         provider_name in {"groq", "groqcloud"}
-        and configured_model in allowed_groq_models
-        and returned_model == configured_model
+        and configured_model_id in allowed_model_ids
+        and returned_model_id == configured_model_id
         and groq.get("request_attempted") is True
         and str(groq.get("response_source") or "").upper() == "LIVE_API"
         and groq.get("response_validated") is True
@@ -446,9 +448,11 @@ def run_challenge1_v2_supervisor_reviews(
     allowed_groq_models = GROQ_ALLOWED_MODELS
     configured_model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
+    configured_model_id = normalize_groq_model_id(configured_model)
+    returned_model_id = normalize_groq_model_id(returned_model)
     model_is_groq_allowlisted = (
-        configured_model in allowed_groq_models
-        and returned_model.split(":", 1)[0] == configured_model.split(":", 1)[0]
+        configured_model_id in {normalize_groq_model_id(item) for item in allowed_groq_models}
+        and returned_model_id == configured_model_id
     )
     approved = (
         expected_side in {"LONG", "SHORT"}
@@ -763,7 +767,7 @@ def _run_provider(provider: dict[str, Any], evidence: dict[str, Any], *,
                 provider, "MODEL_UNCONFIRMED",
                 http_status=http_status, latency_ms=latency_ms,
             )
-        if returned_model.strip().split(":", 1)[0] != provider["model"].split(":", 1)[0]:
+        if normalize_groq_model_id(returned_model) != normalize_groq_model_id(provider["model"]):
             result = _failure(
                 provider, "MODEL_MISMATCH",
                 http_status=http_status, latency_ms=latency_ms,

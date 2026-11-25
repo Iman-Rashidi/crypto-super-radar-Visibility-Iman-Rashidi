@@ -10,17 +10,23 @@ class Challenge1V2FourSlotPolicyTests(unittest.TestCase):
     def test_runtime_policy_is_four_slots_and_blocks_the_fifth(self):
         policy = build_v2_demo_risk_policy()
         self.assertEqual(policy.max_concurrent_positions, 4)
-        self.assertEqual(policy.max_leverage, 1)
+        self.assertEqual(policy.max_leverage, 3)
+        self.assertEqual(policy.risk_per_trade_pct, 0.0025)
+        self.assertEqual(policy.max_aggregate_risk_pct, 0.01)
+        self.assertEqual(policy.daily_loss_limit_pct, 0.02)
+        self.assertEqual(policy.max_margin_usage_pct, 0.25)
+        self.assertEqual(policy.min_reward_risk, 1.4)
         executor = BloFinDemoExecutor(client=object(), store=object(), policy=policy, trading_enabled=True)
         self.assertEqual(executor.policy.max_concurrent_positions, 4)
+        reservations = []
         for active_count in range(4):
-            positions = [{"instId": f"ASSET{i + 1}-USDT"} for i in range(active_count)]
             allowed, reason = v2_entry_capacity(
-                positions, [], candidate_symbol="NEWCOIN-USDT",
+                reservations, [], candidate_symbol=f"ASSET{active_count + 1}-USDT",
                 max_concurrent_positions=policy.max_concurrent_positions,
             )
             self.assertTrue(allowed, reason)
-        four_positions = [{"instId": f"ASSET{i + 1}-USDT"} for i in range(4)]
+            reservations.append({"instId":f"ASSET{active_count + 1}-USDT"})
+        four_positions = reservations
         allowed, reason = v2_entry_capacity(
             four_positions, [], candidate_symbol="FIFTH-USDT",
             max_concurrent_positions=policy.max_concurrent_positions,
@@ -29,13 +35,16 @@ class Challenge1V2FourSlotPolicyTests(unittest.TestCase):
         self.assertEqual(reason, "MAX_CONCURRENT_POSITIONS_REACHED")
 
 
-    def test_v2_policy_uses_half_percent_risk_and_5000_usdt_notional_cap(self):
+    def test_v2_policy_uses_quarter_percent_risk_and_four_slot_caps(self):
         policy = build_v2_demo_risk_policy()
-        self.assertEqual(policy.risk_per_trade_pct, 0.005)
+        self.assertEqual(policy.risk_per_trade_pct, 0.0025)
         self.assertEqual(policy.max_position_notional_usdt, 5000.0)
-        self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
-        self.assertEqual(policy.max_leverage, 1)
+        self.assertEqual(policy.max_aggregate_risk_pct, 0.01)
+        self.assertEqual(policy.daily_loss_limit_pct, 0.02)
+        self.assertEqual(policy.max_margin_usage_pct, 0.25)
+        self.assertEqual(policy.max_leverage, 3)
         self.assertEqual(policy.max_concurrent_positions, 4)
+        self.assertEqual(policy.min_reward_risk, 1.4)
 
 
 class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
@@ -71,8 +80,10 @@ class FakeStore:
 class FakeExchange:
     def __init__(self,mark="102.4"): self.mark=mark; self.calls=[]
     def get_positions(self,inst_id=None):
-        return [{"instId":"BTC-USDT","positionId":"pos-1","positionSide":"net","positions":"2"}]
+        if inst_id=="BAD-USDT": raise RuntimeError("mock single-position read failure")
+        return [{"instId":inst_id or "BTC-USDT","positionId":"pos-1","positionSide":"net","positions":"2","marginMode":"isolated"}]
     def get_mark_price(self,*,inst_id): return [{"markPrice":self.mark}]
+    def get_tradable_instrument(self,inst_id): return {"tickSize":"0.1","lotSize":"0.1","minSize":"0.1"}
     def get_open_tpsl_orders(self,*,inst_id,client_order_id=None,tpsl_id=None,limit=100):
         return [{
             "instId":inst_id,"positionSide":"net","marginMode":"isolated",
@@ -81,12 +92,17 @@ class FakeExchange:
         }]
     def partial_close_reduce_only(self,**kw): self.calls.append(("partial",kw)); return {"data":[{"orderId":"tp1"}]}
     def get_order_detail(self,inst_id,*,client_order_id):
+        if client_order_id.startswith("TMKT"): return []
+        if client_order_id.startswith("TIME"):
+            return [{"instId":inst_id,"clientOrderId":client_order_id,"orderId":"limit-order-1","state":"live"}]
         return [{"clientOrderId":client_order_id,"state":"filled","filledSize":"1"}]
     def amend_or_replace_sl(self,**kw): self.calls.append(("amend_sl",kw)); return {"sl_verified":True}
     def get_candles(self,inst_id,*,bar,limit):
         base=1_800_000_000_000
         return [[base+i*900000,"1","2","1","2","1","1","1","1"] for i in range(12)]
     def place_limit_exit_reduce_only(self,**kw): self.calls.append(("time_exit",kw)); return {"data":[{"orderId":"time-exit"}]}
+    def cancel_order(self,**kw): self.calls.append(("cancel_order",kw)); return {"status":"CANCELED"}
+    def place_market_exit_reduce_only(self,**kw): self.calls.append(("market_exit",kw)); return {"data":[{"orderId":"market-exit"}]}
 
 class Challenge1V2ExitManagerTests(unittest.TestCase):
     def state(self):
@@ -101,10 +117,55 @@ class Challenge1V2ExitManagerTests(unittest.TestCase):
         self.assertTrue(store.state["tp1_executed"]); self.assertEqual(store.state["remaining_size"],"1")
         self.assertEqual([c[0] for c in exchange.calls],["partial","amend_sl"])
     def test_12_closed_candles_submit_reduce_only_limit_exit(self):
-        store,exchange=FakeStore(self.state()),FakeExchange(mark="100")
+        store,exchange=FakeStore(self.state()),FakeExchange(mark="100.07")
         out=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
         self.assertEqual(out["results"][0]["status"],"TIME_EXIT_SUBMITTED")
-        self.assertEqual(exchange.calls[0][0],"time_exit"); self.assertEqual(store.state["status"],"TIME_EXIT_PENDING")
+        self.assertEqual(exchange.calls[0][0],"time_exit"); self.assertEqual(exchange.calls[0][1]["limit_price"],"100.0")
+        self.assertEqual(store.state["status"],"TIME_EXIT_PENDING")
+
+    def test_pending_time_exit_escalates_after_one_new_closed_15m_candle(self):
+        state=self.state()
+        state.update(status="TIME_EXIT_PENDING",exit_order_id="TIME12345678901234567890",
+                     time_exit_pending_cycles=0,time_exit_started_candles=11,
+                     time_exit_receipt={"data":[{"orderId":"limit-order-1"}]})
+        store,exchange=FakeStore(state),FakeExchange(mark="100")
+        out=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
+        self.assertEqual(out["results"][0]["status"],"TIME_EXIT_MARKET_SUBMITTED")
+        self.assertEqual([call[0] for call in exchange.calls],["cancel_order","market_exit"])
+
+    def test_pending_time_exit_escalates_to_market_after_two_cycles(self):
+        state=self.state()
+        state.update(status="TIME_EXIT_PENDING",exit_order_id="TIME12345678901234567890",
+                     time_exit_pending_cycles=0,time_exit_started_candles=12,
+                     time_exit_receipt={"data":[{"orderId":"limit-order-1"}]})
+        store,exchange=FakeStore(state),FakeExchange(mark="100")
+        first=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
+        self.assertEqual(first["results"][0]["status"],"TIME_EXIT_ALREADY_PENDING")
+        second=manage_open_positions(exchange,store,now_ms=1_800_020_000_001)
+        self.assertEqual(second["results"][0]["status"],"TIME_EXIT_MARKET_SUBMITTED")
+        self.assertEqual([call[0] for call in exchange.calls],["cancel_order","market_exit"])
+        self.assertEqual(store.state["status"],"TIME_EXIT_MARKET_PENDING")
+
+    def test_one_position_error_does_not_stop_later_position_checks(self):
+        class MultiStore(FakeStore):
+            def list_v2_position_exit_states(self,active_only=True,limit=100):
+                first={"position_id":"bad","instrument_id":"BAD-USDT","status":"OPEN"}
+                second={"position_id":"good","instrument_id":"ETH-USDT","status":"OPEN",
+                        "entry_price":"100","initial_stop_loss":"98","original_size":"2",
+                        "remaining_size":"2","tp1_executed":False,"candles_elapsed":0,
+                        "entry_time_ms":1_799_999_999_999,"net_break_even_price":"100.15",
+                        "sl_tpsl_id":"tpsl-1","side":"LONG"}
+                return [{"payload":first},{"payload":second}]
+        class MultiExchange(FakeExchange):
+            def get_positions(self,inst_id=None):
+                if inst_id=="BAD-USDT": raise RuntimeError("mock isolated failure")
+                return []
+            def get_positions_history(self,**kwargs): return []
+        store,exchange=MultiStore({}),MultiExchange(mark="100")
+        out=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
+        self.assertEqual(out["results"][0]["status"],"EXIT_MANAGEMENT_ERROR")
+        self.assertEqual(out["results"][0]["error_type"],"RuntimeError")
+        self.assertEqual(out["results"][1]["status"],"CLOSE_HISTORY_CHECK_FAILED")
 
     def test_time_exit_remains_active_after_tp1_and_break_even(self):
         state=self.state()

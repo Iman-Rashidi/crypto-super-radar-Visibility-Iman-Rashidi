@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from crypto_super_radar.challenge1_v2_trade_controls import (
     V2PositionControlBlocked,
@@ -50,10 +51,11 @@ class Challenge1V2TradeControlTests(unittest.TestCase):
             {"side": "SHORT", "entry_price": "100", "initial_stop_loss": "110",
              "remaining_size": "1", "tp1_taken": False},
             mark_price="102", bars_since_entry=12, lot_size="0.1",
-            min_size="0.1", fee_rate_per_side="0.0006",
+            min_size="0.1", fee_rate_per_side="0.0006", tick_size="0.1",
         )
         self.assertEqual(result["action"], "TIME_EXIT_LIMIT_AT_NET_BREAK_EVEN")
         self.assertLess(float(result["limit_price"]), 100)
+        self.assertEqual(Decimal(result["limit_price"]) % Decimal("0.1"), Decimal("0"))
 
     def test_tp1_half_below_minimum_fails_closed(self):
         with self.assertRaises(V2PositionControlBlocked):
