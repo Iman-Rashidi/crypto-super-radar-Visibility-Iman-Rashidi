@@ -39,6 +39,8 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED || 'true' }}
+      # The 15-minute dispatcher manages the single one-shot position; it must not open new entries.
+      CHALLENGE_1_V2_MANAGE_ONLY: 'true'
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       BLOFIN_DEMO_TRADING_ENABLED: ${{ vars.BLOFIN_DEMO_TRADING_ENABLED || 'true' }}
