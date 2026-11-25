@@ -492,10 +492,22 @@ def build_demo_order_plan(
         v2_evidence = record.get("challenge1_v2_evidence")
         if not isinstance(v2_evidence, Mapping):
             raise BloFinDemoExecutionBlocked("V2 candle identity is required for duplicate-candle protection.")
-        candle_timeframe = str(v2_evidence.get("setup_timeframe") or "").strip().lower()
+        setup_timeframe = str(v2_evidence.get("setup_timeframe") or "").strip().lower()
+        entry_timeframe = str(v2_evidence.get("entry_execution_timeframe") or "").strip().lower()
         candle_open_utc = str(v2_evidence.get("signal_candle_open_utc") or "").strip()
-        if candle_timeframe != "15m" or not candle_open_utc:
-            raise BloFinDemoExecutionBlocked("V2 setup timeframe and closed-candle timestamp are required.")
+        if setup_timeframe == "1h" and entry_timeframe == "15m":
+            # Standard V2 setup is detected on 1H, but its signal identity is
+            # the completed 15m execution candle; deduplicate on that candle.
+            candle_timeframe = "15m"
+        elif setup_timeframe in {"5m", "15m"} and entry_timeframe in {"", "15m"}:
+            # Early-W3 uses its 5m signal candle; ordinary 15m setups use 15m.
+            candle_timeframe = setup_timeframe
+        else:
+            raise BloFinDemoExecutionBlocked(
+                "V2 setup/entry timeframe pair is unsupported for candle identity."
+            )
+        if not candle_open_utc:
+            raise BloFinDemoExecutionBlocked("V2 closed-candle timestamp is required.")
         candle_guard = {
             "instrument_id": inst_id.strip().upper(),
             "timeframe": candle_timeframe,

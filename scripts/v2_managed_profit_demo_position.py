@@ -126,8 +126,18 @@ def _report_proves_no_entry(report_text: str) -> bool:
                 return False
             if selected.get("orders_submitted") is not False or selected.get("execution_result") is not None:
                 return False
-            if str(selected.get("status") or "") not in {"AI_REVIEW_BLOCKED", "NO_TRADE", "SIGNAL_BLOCKED"}:
-                return False
+            status = str(selected.get("status") or "")
+            if status in {"AI_REVIEW_BLOCKED", "NO_TRADE", "SIGNAL_BLOCKED"}:
+                continue
+            # This exact executor preflight exception is raised before any
+            # exchange write; permit a same-candle retry after the schema fix.
+            if (
+                status == "DATA_BLOCKED"
+                and str(selected.get("reason") or "") ==
+                "BloFinDemoExecutionBlocked: V2 setup timeframe and closed-candle timestamp are required."
+            ):
+                continue
+            return False
         return True
     except Exception:
         return False

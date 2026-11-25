@@ -946,6 +946,20 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
                 duplicate, max_concurrent_positions=4, v2_autopilot=True,
             ))
 
+    def test_v2_one_hour_setup_uses_15m_entry_candle_for_dedup(self):
+        record = v2_signal_record()
+        evidence = record["challenge1_v2_evidence"]
+        evidence["setup_timeframe"] = "1H"
+        evidence["entry_execution_timeframe"] = "15m"
+        plan = build_demo_order_plan(
+            record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        self.assertEqual(plan["candle_guard_timeframe"], "15m")
+        self.assertEqual(
+            plan["candle_guard_open_utc"],
+            evidence["signal_candle_open_utc"],
+        )
+
     def test_v2_reservation_requires_closed_candle_identity(self):
         plan = build_demo_order_plan(
             v2_signal_record(), instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,

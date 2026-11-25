@@ -134,6 +134,13 @@ class ManagedProfitTop1Tests(unittest.TestCase):
             }
         }
         self.assertTrue(_report_proves_no_entry(json.dumps(report)))
+        report["v2_cycle"]["symbols"][0]["status"] = "DATA_BLOCKED"
+        report["v2_cycle"]["symbols"][0]["reason"] = (
+            "BloFinDemoExecutionBlocked: V2 setup timeframe and closed-candle timestamp are required."
+        )
+        self.assertTrue(_report_proves_no_entry(json.dumps(report)))
+        report["v2_cycle"]["symbols"][0]["reason"] = "unknown exchange outcome"
+        self.assertFalse(_report_proves_no_entry(json.dumps(report)))
         report["v2_cycle"]["symbols"][1]["orders_submitted"] = True
         self.assertFalse(_report_proves_no_entry(json.dumps(report)))
 
