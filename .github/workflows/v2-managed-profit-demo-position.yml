@@ -11,6 +11,7 @@ on:
       - "crypto_super_radar/challenge1_v2_autopilot.py"
       - "crypto_super_radar/challenge1_v2_orchestration.py"
       - "crypto_super_radar/telegram_notifier.py"
+      - "crypto_super_radar/web_app.py"
       - "tests/test_blofin_demo_executor.py"
       - "tests/test_challenge1_v2_autopilot.py"
       - "tests/test_challenge1_v2_web_orchestration.py"
