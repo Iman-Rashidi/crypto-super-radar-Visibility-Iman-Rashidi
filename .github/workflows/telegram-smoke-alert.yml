@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   telegram-smoke:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip-v2-demo]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
