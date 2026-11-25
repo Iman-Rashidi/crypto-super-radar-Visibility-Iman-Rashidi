@@ -296,3 +296,62 @@ class Challenge1V2SpecialistNormalizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Challenge1V2SupervisorEchoNormalizationTests(unittest.TestCase):
+    def test_approved_groq_echoes_are_normalized_and_missing_wave_labels_use_evidence(self):
+        candidate = SimpleNamespace(
+            signal=SimpleNamespace(value="SHORT"),
+            metrics={
+                "execution_profile": "CHALLENGE_1_V2",
+                "challenge1_v2_evidence": {
+                    "elliott_wave": {
+                        "phase": "WAVE_4_CONFIRMED",
+                        "pattern": "BEARISH",
+                    }
+                },
+            },
+        )
+        review = valid_approval()
+        review.update({
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "expected_side": "short",
+            "trader_proposal": "short",
+            "elliott_wave_phase": "Wave 4 Confirmed",
+            "elliott_wave_direction": "downtrend",
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_challenge1_v2_supervisor_reviews(
+                candidate, "perp:BTCUSDT", second_reviewer=lambda *_a, **_k: review,
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["ai_review"]["expected_side"], "SHORT")
+        self.assertEqual(result["ai_review"]["trader_proposal"], "SHORT")
+        self.assertEqual(result["ai_review"]["elliott_wave_phase"], "WAVE_4_CONFIRMED")
+        self.assertEqual(result["ai_review"]["elliott_wave_direction"], "BEARISH")
+
+    def test_approved_groq_review_fills_only_missing_wave_echo_from_evidence(self):
+        candidate = SimpleNamespace(
+            signal=SimpleNamespace(value="LONG"),
+            metrics={
+                "execution_profile": "CHALLENGE_1_V2",
+                "challenge1_v2_evidence": {
+                    "elliott_wave": {
+                        "phase": "WAVE_3_CONFIRMED",
+                        "pattern": "BULLISH",
+                    }
+                },
+            },
+        )
+        review = valid_approval()
+        review.pop("elliott_wave_phase")
+        review.pop("elliott_wave_direction")
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_challenge1_v2_supervisor_reviews(
+                candidate, "perp:BTCUSDT", second_reviewer=lambda *_a, **_k: review,
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["ai_review"]["elliott_wave_phase"], "WAVE_3_CONFIRMED")
+        self.assertEqual(result["ai_review"]["elliott_wave_direction"], "BULLISH")
+
