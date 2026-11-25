@@ -93,8 +93,8 @@ def _run_two_reviewer_challenge1_supervisor_reviews(
     evidence = evidence if isinstance(evidence, dict) else {}
     wave = evidence.get("elliott_wave")
     wave = wave if isinstance(wave, dict) else {}
-    expected_wave_phase = str(wave.get("phase") or "").upper()
-    expected_wave_direction = str(wave.get("pattern") or "").upper()
+    expected_wave_phase = _ai._normalize_v2_phase(wave.get("phase"))
+    expected_wave_direction = _ai._normalize_v2_direction(wave.get("pattern"))
 
     def unavailable(reviewer_id: str, error_type: str) -> dict[str, Any]:
         return {
@@ -385,6 +385,26 @@ def run_challenge1_v2_supervisor_reviews(
     groq["reviewed_signal_id"] = str(signal_id or "").strip()
     reviewed_at_utc = datetime.now(timezone.utc).isoformat()
     groq["reviewed_at_utc"] = reviewed_at_utc
+
+    # Normalize harmless formatting/synonyms at the supervisor boundary too.
+    # Missing echoes are sourced from deterministic evidence only after the
+    # underlying validator has approved the complete specialist review.
+    review_is_approved = (
+        str(groq.get("status") or "").strip().upper() == "APPROVED"
+        and groq.get("paper_entry_eligible") is True
+    )
+    echoed_phase = _ai._normalize_v2_phase(groq.get("elliott_wave_phase"))
+    echoed_direction = _ai._normalize_v2_direction(groq.get("elliott_wave_direction"))
+    echoed_side = _ai._normalize_v2_side(groq.get("expected_side"))
+    if review_is_approved:
+        groq["elliott_wave_phase"] = echoed_phase or expected_wave_phase
+        groq["elliott_wave_direction"] = echoed_direction or expected_wave_direction
+        groq["expected_side"] = echoed_side or expected_side
+        groq["trader_proposal"] = _ai._normalize_v2_side(groq.get("trader_proposal"))
+    else:
+        groq["elliott_wave_phase"] = echoed_phase
+        groq["elliott_wave_direction"] = echoed_direction
+        groq["expected_side"] = echoed_side
 
     provider_name = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
     allowed_groq_models = GROQ_ALLOWED_MODELS
