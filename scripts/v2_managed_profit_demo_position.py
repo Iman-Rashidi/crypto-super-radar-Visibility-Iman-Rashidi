@@ -105,12 +105,16 @@ def _report_proves_no_entry(report_text: str) -> bool:
         rows = cycle.get("symbols") or []
         if cycle.get("orders_submitted") is not False or cycle.get("trade_executed") is not False:
             return False
-        if len(rows) != 1 or not isinstance(rows[0], Mapping):
+        if not rows or len(rows) > len(SYMBOLS):
             return False
-        selected = rows[0]
-        if selected.get("orders_submitted") is not False or selected.get("execution_result") is not None:
-            return False
-        return str(selected.get("status") or "") in {"AI_REVIEW_BLOCKED", "NO_TRADE", "SIGNAL_BLOCKED"}
+        for selected in rows:
+            if not isinstance(selected, Mapping):
+                return False
+            if selected.get("orders_submitted") is not False or selected.get("execution_result") is not None:
+                return False
+            if str(selected.get("status") or "") not in {"AI_REVIEW_BLOCKED", "NO_TRADE", "SIGNAL_BLOCKED"}:
+                return False
+        return True
     except Exception:
         return False
 
@@ -282,32 +286,52 @@ def main() -> int:
             return 0
         _save_report(db, report, "TOP1_SELECTED", lock_key)
 
+        direction_by_symbol = {item["symbol"]: item["direction"] for item in ranked}
+
         def analyze_selected(exchange: Any, symbol: str) -> Mapping[str, Any]:
-            if symbol != winner["symbol"]:
-                raise RuntimeError("Runner attempted to analyze a non-Top-1 symbol")
+            expected_direction = direction_by_symbol.get(symbol)
+            if expected_direction not in {"LONG", "SHORT"}:
+                raise RuntimeError("Runner attempted to analyze a symbol outside the ranked Demo candidate set")
             signal = analyze_challenge1_v2_market(exchange, symbol)
-            if str(signal.get("signal") or "").upper() != winner["direction"]:
+            if str(signal.get("signal") or "").upper() != expected_direction:
                 signal = dict(signal)
                 signal.update({
                     "signal": "NO_TRADE", "status": "NO_TRADE",
-                    "reason": "Top-1 momentum direction does not match the formal V2 signal",
+                    "reason": "Ranked momentum direction does not match the formal V2 signal",
                     "orders_submitted": False,
                 })
             return signal
 
         cycle = run_cycle(
-            client, db, analyzer=analyze_selected, symbols=(winner["symbol"],),
+            client, db, analyzer=analyze_selected,
+            symbols=tuple(item["symbol"] for item in ranked),
             executor=executor, environ=os.environ, notifier=_NoopNotifier(),
         )
         report["v2_cycle"] = cycle
         rows = cycle.get("symbols") or []
-        if len(rows) != 1:
-            raise RuntimeError("V2 runner did not return exactly one candidate record")
-        selected = rows[0]
-        execution = selected.get("execution_result")
-        if not selected.get("orders_submitted") or not isinstance(execution, Mapping):
-            review_items = selected.get("ai_reviews") or []
+        if len(rows) != len(ranked):
+            raise RuntimeError("V2 runner did not return one record per ranked candidate")
+        executed = [
+            row for row in rows
+            if row.get("orders_submitted") is True and isinstance(row.get("execution_result"), Mapping)
+        ]
+        if len(executed) > 1:
+            raise RuntimeError("One-shot Demo runner observed more than one submitted entry")
+        if not executed:
+            reviewed = next((row for row in rows if row.get("ai_reviews")), rows[0] if rows else {})
+            review_items = reviewed.get("ai_reviews") or []
             first_review = review_items[0].get("review") if review_items and isinstance(review_items[0], Mapping) else {}
+            report["candidate_outcomes"] = [
+                {
+                    "symbol": row.get("symbol"),
+                    "signal": row.get("signal"),
+                    "status": row.get("status"),
+                    "reason": row.get("reason"),
+                    "entry_skipped_reason": row.get("entry_skipped_reason"),
+                    "orders_submitted": row.get("orders_submitted"),
+                }
+                for row in rows
+            ]
             report["groq"] = {
                 "status": "NOT_APPROVED_OR_NOT_CALLED",
                 "request_attempted": bool(isinstance(first_review, Mapping) and first_review.get("request_attempted") is True),
@@ -320,6 +344,10 @@ def main() -> int:
             _save_report(db, report, "NO_TRADE_RETRYABLE", lock_key)
             print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), flush=True)
             return 0
+        selected = executed[0]
+        winner = next(item for item in ranked if item["symbol"] == selected["symbol"])
+        report["selected_candidate"] = winner
+        execution = selected["execution_result"]
         report["groq"] = _verify_groq(selected)
         if execution.get("environment") != "BLOFIN_DEMO":
             raise RuntimeError("Execution result is not explicitly BloFin Demo")

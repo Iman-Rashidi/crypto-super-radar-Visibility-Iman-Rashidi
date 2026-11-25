@@ -5,6 +5,7 @@ from decimal import Decimal
 from scripts.v2_managed_profit_demo_position import (
     rank_top1_momentum, _tp1_price, SYMBOLS,
     build_candle_idempotency_key, _claim_once, _one_position_risk_policy,
+    _report_proves_no_entry,
 )
 
 
@@ -83,6 +84,22 @@ class ManagedProfitTop1Tests(unittest.TestCase):
         self.assertEqual(policy.risk_per_trade_pct, 0.005)
         self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
         self.assertEqual(policy.max_leverage, 1)
+
+    def test_multiple_ranked_no_entry_records_are_safe_to_retry(self):
+        import json
+        report = {
+            "v2_cycle": {
+                "orders_submitted": False,
+                "trade_executed": False,
+                "symbols": [
+                    {"status": "NO_TRADE", "orders_submitted": False, "execution_result": None},
+                    {"status": "AI_REVIEW_BLOCKED", "orders_submitted": False, "execution_result": None},
+                ],
+            }
+        }
+        self.assertTrue(_report_proves_no_entry(json.dumps(report)))
+        report["v2_cycle"]["symbols"][1]["orders_submitted"] = True
+        self.assertFalse(_report_proves_no_entry(json.dumps(report)))
 
     def test_tp1_target_uses_existing_v2_1_2r_rule(self):
         self.assertEqual(_tp1_price("100", "98", "LONG"), "102.4")
