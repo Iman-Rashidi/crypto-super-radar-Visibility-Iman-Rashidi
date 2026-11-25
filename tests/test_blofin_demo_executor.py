@@ -577,6 +577,20 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self.assertEqual(headers["ACCESS-SIGN"], expected)
         self.assertTrue(headers["ACCESS-NONCE"])
 
+    def test_v2_order_payload_omits_exchange_take_profit_but_keeps_full_size_sl(self):
+        self.client.place_futures_order(
+            inst_id="BTC-USDT", side="buy", position_side="net", size="2.5",
+            client_order_id="0123456789abcdef0123456789abcdef",
+            take_profit=None, stop_loss="98",
+        )
+        payload = json.loads(self.session.post.call_args.kwargs["data"])
+        self.assertNotIn("tpTriggerPrice", payload)
+        self.assertNotIn("tpOrderPrice", payload)
+        self.assertEqual(payload["size"], "2.5")
+        self.assertEqual(payload["slTriggerPrice"], "98")
+        self.assertEqual(payload["slOrderPrice"], "-1")
+        self.assertEqual(payload["slTriggerPriceType"], "mark")
+
     def test_set_leverage_is_capped_at_three_and_uses_isolated_margin(self):
         self.client.set_futures_leverage("BTC-USDT", 3, position_side="long")
         args, kwargs = self.session.post.call_args
