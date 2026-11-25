@@ -42,6 +42,9 @@ from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .learning_experience_memory import LearningExperienceMemory
 
 
+GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
+
+
 class BloFinDemoExecutionBlocked(RuntimeError):
     """A safety gate prevented Demo execution."""
 
@@ -198,9 +201,7 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         returned_model = str(review.get("returned_model") or "").strip()
         model_identity = model.split(":", 1)[0].casefold()
         returned_identity = returned_model.split(":", 1)[0].casefold()
-        allowed_groq_models = {
-            "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-        }
+        allowed_groq_models = GROQ_ALLOWED_MODELS
         try:
             reviewer_time = datetime.fromisoformat(
                 str(review.get("reviewed_at_utc") or "").replace("Z", "+00:00")
