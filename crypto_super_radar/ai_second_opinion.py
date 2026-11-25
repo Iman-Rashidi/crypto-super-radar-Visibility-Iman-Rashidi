@@ -182,6 +182,7 @@ _SAFE_AI_VALUE_ERRORS = {
     "AI approval conflicts with specialist risk validation": "AI_APPROVAL_RISK_CONFLICT",
     "V2 Elliott reviewer evidence is missing": "AI_V2_WAVE_EVIDENCE_MISSING",
     "V2 Elliott phase/direction was not independently confirmed": "AI_V2_WAVE_EVIDENCE_MISMATCH",
+    "V2 Elliott reviewer did not independently confirm the supplied wave evidence": "AI_V2_WAVE_EVIDENCE_UNCONFIRMED",
     "Missing second AI response choices": "SECOND_AI_RESPONSE_CHOICES_MISSING",
     "Missing second AI response message": "SECOND_AI_RESPONSE_MESSAGE_MISSING",
     "Second AI response content is missing or too large": "SECOND_AI_RESPONSE_CONTENT_INVALID",
@@ -1012,10 +1013,12 @@ def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
         '"risk_flags":["..."],"rationale_fa":"..."} '
         "Every specialist_views role and wave_analyst is REQUIRED; never omit a role. "
-        "If evidence is insufficient, use UNKNOWN/UNCERTAIN/INSUFFICIENT_DATA and explain why; never invent a positive view. "
-        "The following is a complete fail-closed JSON shape example. Copy every key, but replace every value using the supplied evidence; "
-        "the example values are not a recommendation: "
-        '{"specialist_views":{'
+        "If evidence is insufficient, use UNKNOWN/UNCERTAIN/INSUFFICIENT_DATA for the specialist verdicts and explain why; never invent a positive view. "
+        "Regardless of the verdict, always echo the supplied canonical values exactly in the three top-level keys and in wave_analyst.phase/direction. "
+        "Do not replace a known supplied phase or direction with UNKNOWN. "
+        "The following is a complete fail-closed JSON shape example. Copy every key, but replace specialist verdicts using the supplied evidence; "
+        "the example is not an approval: "
+        '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
         '"market_regime":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
         '"technical":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
         '"news_sentiment":{"view":"UNKNOWN","reason_fa":"داده کافی نیست."},'
@@ -1496,19 +1499,21 @@ def _validated_v2_review(
     # A model may omit the repeated labels after explicitly supporting the
     # Elliott analyst. Fill only those missing labels from deterministic input
     # evidence, and only after the remaining specialist schema is APPROVED.
-    if result.get("status") == "APPROVED" and wave_verdict == "SUPPORT":
+    if expected_phase not in {
+        "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+    } or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH"):
+        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+    if wave_verdict in {"UNCERTAIN", "UNKNOWN", "INSUFFICIENT_DATA"}:
+        raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
+    if wave_verdict != "SUPPORT":
+        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+    if result.get("status") == "APPROVED":
         supplied_phase = supplied_phase or expected_phase
         supplied_direction = supplied_direction or expected_direction
-    if (
-        wave_verdict != "SUPPORT"
-        or supplied_phase != expected_phase
-        or supplied_direction != expected_direction
-        or expected_phase not in {
-            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
-            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
-        }
-        or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH")
-    ):
+    if not supplied_phase or not supplied_direction:
+        raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
+    if supplied_phase != expected_phase or supplied_direction != expected_direction:
         raise ValueError("V2 Elliott phase/direction was not independently confirmed")
     for key, canonical, normalizer in (
         ("elliott_wave_phase", expected_phase, _normalize_v2_phase),
