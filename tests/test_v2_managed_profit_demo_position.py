@@ -151,3 +151,37 @@ class ManagedProfitTop1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManagedProfitProtectionReadbackTests(unittest.TestCase):
+    def test_full_size_sl_matches_without_position_id(self):
+        from scripts.v2_managed_profit_demo_position import _match_full_size_sl
+        rows = [{
+            "tpslId": "sl-1", "instId": "BTC-USDT", "positionSide": "net",
+            "marginMode": "isolated", "side": "sell", "state": "live",
+            "size": "2", "actualSize": "2", "slTriggerPrice": "98",
+            "slTriggerPriceType": "mark", "tpTriggerPrice": None,
+        }]
+        matches = _match_full_size_sl(
+            rows, inst_id="BTC-USDT", side="LONG", filled_size="2", stop_loss="98"
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertNotIn("positionId", matches[0])
+
+    def test_full_size_sl_rejects_wrong_size_or_trigger_or_tp(self):
+        from scripts.v2_managed_profit_demo_position import _match_full_size_sl
+        base = {
+            "tpslId": "sl-1", "instId": "BTC-USDT", "positionSide": "net",
+            "marginMode": "isolated", "side": "sell", "state": "live",
+            "size": "2", "actualSize": "2", "slTriggerPrice": "98",
+            "slTriggerPriceType": "mark", "tpTriggerPrice": None,
+        }
+        for change in (
+            {"size": "1"}, {"slTriggerPrice": "97"},
+            {"tpTriggerPrice": "102.4"}, {"marginMode": "cross"},
+        ):
+            with self.subTest(change=change):
+                self.assertEqual(_match_full_size_sl(
+                    [{**base, **change}], inst_id="BTC-USDT", side="LONG",
+                    filled_size="2", stop_loss="98",
+                ), [])

@@ -207,6 +207,54 @@ def _save_report(db: Any, report: dict[str, Any], status: str, lock_key: str) ->
         raise RuntimeError("Turso one-shot report read-back mismatch")
 
 
+
+
+def _match_full_size_sl(
+    rows: list[Mapping[str, Any]], *, inst_id: str, side: str,
+    filled_size: str, stop_loss: str,
+) -> list[Mapping[str, Any]]:
+    """Match one full-size isolated SL using documented TPSL response fields only."""
+    direction = str(side or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        raise ValueError("Invalid position direction for SL verification")
+    expected_close_side = "sell" if direction == "LONG" else "buy"
+    expected_size = Decimal(str(filled_size))
+    expected_stop = Decimal(str(stop_loss))
+    if not expected_size.is_finite() or expected_size <= 0:
+        raise ValueError("Filled size is invalid for SL verification")
+    if not expected_stop.is_finite() or expected_stop <= 0:
+        raise ValueError("Stop price is invalid for SL verification")
+    matches = []
+    for row in rows:
+        if str(row.get("instId") or "").upper() != str(inst_id).upper():
+            continue
+        if str(row.get("positionSide") or "").lower() != "net":
+            continue
+        if str(row.get("marginMode") or "").lower() != "isolated":
+            continue
+        if str(row.get("side") or "").lower() != expected_close_side:
+            continue
+        if str(row.get("state") or "").lower() != "live":
+            continue
+        if str(row.get("slTriggerPriceType") or "").lower() != "mark":
+            continue
+        if row.get("tpTriggerPrice") not in (None, ""):
+            continue
+        if row.get("slTriggerPrice") in (None, "") or not str(row.get("tpslId") or "").strip():
+            continue
+        sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+        if not sizes:
+            continue
+        try:
+            if Decimal(str(row["slTriggerPrice"])) != expected_stop:
+                continue
+            if any(Decimal(str(value)) != expected_size for value in sizes):
+                continue
+        except Exception:
+            continue
+        matches.append(row)
+    return matches
+
 def _verify_groq(signal: Mapping[str, Any]) -> dict[str, Any]:
     reviews = signal.get("ai_reviews")
     if not isinstance(reviews, list) or len(reviews) != 1 or not isinstance(reviews[0], Mapping):
@@ -394,22 +442,18 @@ def main() -> int:
         entry_order_id = str(execution.get("exchange_order_id") or "")
         if not all((entry_cid, position_id, entry_order_id)):
             raise RuntimeError("Entry fill lacks exchange order/position identity")
-        active_tpsl = _rows(client.get_open_tpsl_orders(inst_id=inst, client_order_id=entry_cid, limit=100))
-        sl_matches = [
-            row for row in active_tpsl
-            if str(row.get("positionId") or "") == position_id
-            and str(row.get("state") or "").lower() == "live"
-            and row.get("slTriggerPrice") not in (None, "")
-            and str(row.get("tpslId") or "")
-        ]
-        if len(sl_matches) != 1:
-            raise RuntimeError("Exact live exchange SL order could not be independently read back")
-        sl = sl_matches[0]
-        if sl.get("tpTriggerPrice") not in (None, ""):
-            raise RuntimeError("Unexpected exchange TP was attached; V2 owns TP1")
-        entry_price = str(execution.get("entry_price") or execution.get("entry_reference_price") or "")
-        stop_loss = str(execution.get("stop_loss") or "")
+        active_tpsl = _rows(client.get_open_tpsl_orders(inst_id=inst, limit=100))
         side = str(execution.get("side") or winner["direction"]).upper()
+        filled_size = str(execution.get("filled_size") or "")
+        stop_loss = str(execution.get("stop_loss") or "")
+        sl_matches = _match_full_size_sl(
+            active_tpsl, inst_id=inst, side=side,
+            filled_size=filled_size, stop_loss=stop_loss,
+        )
+        if len(sl_matches) != 1:
+            raise RuntimeError("Exact full-size isolated exchange SL could not be independently read back")
+        sl = sl_matches[0]
+        entry_price = str(execution.get("entry_price") or execution.get("entry_reference_price") or "")
         tp1 = _tp1_price(entry_price, stop_loss, side)
         report["position"] = {
             "instrument_id": inst, "side": side,
