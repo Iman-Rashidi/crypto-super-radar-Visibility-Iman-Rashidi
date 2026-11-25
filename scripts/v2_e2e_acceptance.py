@@ -27,7 +27,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def acquire_permanent_lock() -> None:
+def acquire_permanent_lock() -> bool:
     if storage_backend() != "TURSO_CLOUD_SQLITE":
         raise RuntimeError("Turso Cloud is required; local SQLite is not an acceptable idempotency boundary.")
     db = connect_database()
@@ -73,7 +73,9 @@ def acquire_permanent_lock() -> None:
         )
         db.commit()
         if int(getattr(guard, "rowcount", 0) or 0) != 1:
-            raise RuntimeError("This acceptance key was already claimed; refusing every repeat.")
+            print(json.dumps({"status": "DUPLICATE_SKIPPED", "acceptance_key": LOCK_KEY}), flush=True)
+            return False
+        return True
     finally:
         db.close()
 
@@ -158,7 +160,8 @@ def main() -> int:
         "strategy_validation": "NOT_TESTED_BY_ISOLATED_SMOKE",
         "steps": {},
     }
-    acquire_permanent_lock()
+    if not acquire_permanent_lock():
+        return 0
     try:
         report["steps"]["groq"] = verify_live_groq()
         save_report(report, "GROQ_VERIFIED")
