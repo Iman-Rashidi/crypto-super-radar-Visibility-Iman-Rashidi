@@ -909,7 +909,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(review["request_attempted"])
         self.assertTrue(review["model_verified"])
 
-    def test_groq_rejects_paid_or_unlisted_models_and_nonofficial_endpoint(self):
+    def test_groq_model_is_pinned_and_nonofficial_endpoint_is_rejected(self):
         base = {
             "OPENROUTER_API_KEY": "primary-key",
             "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
@@ -919,8 +919,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         }
         with patch.dict(os.environ, {**base, "CSR_SECOND_AI_MODEL": "unlisted/model"}, clear=True):
             status = second_ai_connection_status()
-        self.assertFalse(status["configured"])
-        self.assertIn("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST", status["configuration_issues"])
+        self.assertTrue(status["configured"], status["configuration_issues"])
+        self.assertEqual(status["model"], "openai/gpt-oss-20b")
         with patch.dict(os.environ, {
             **base,
             "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b",
