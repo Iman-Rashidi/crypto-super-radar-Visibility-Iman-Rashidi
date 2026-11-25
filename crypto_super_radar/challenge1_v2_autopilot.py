@@ -306,12 +306,18 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             notifier = None
     exit_summary=manage_open_positions(client,executor.store,notifier=notifier) if trading_active else {"positions_checked":0,"results":[]}
     rows=[]
+    manage_only=_enabled(env.get("CHALLENGE_1_V2_MANAGE_ONLY"))
     for symbol in symbols:
         try:
-            result=analyzer(client,symbol)
+            if manage_only:
+                result={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE",
+                    "status":"MANAGEMENT_ONLY","reason":"New entries disabled; existing V2 positions remain under exit management"}
+            else:
+                result=analyzer(client,symbol)
             if not isinstance(result,Mapping): raise TypeError("V2 analyzer returned a non-mapping result")
             safe=_safe_record(result)
-            safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,mode="DRY_RUN",
+            safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,
+                mode="MANAGEMENT_ONLY" if manage_only else "DRY_RUN",
                 exit_manager_summary=exit_summary.get("results", []))
             consensus=safe.get("ai_consensus")
             approved = (
@@ -335,7 +341,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                         f"شناسه موقعیت: {entry_state['position_id']}\\nسفارش حفاظتی SL: فعال و تأییدشده",
                     )
                 safe.update(execution_result=dict(execution),orders_submitted=True,mode="DEMO_AUTOPILOT")
-            elif trading_active:
+            elif trading_active and not manage_only:
                 safe["entry_skipped_reason"]="GROQ_APPROVAL_NOT_PRESENT"
         except Exception as exc:
             # Preserve a sanitized, actionable provider/data error in the audit record.
