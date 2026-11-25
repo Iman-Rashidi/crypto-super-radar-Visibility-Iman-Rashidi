@@ -6,6 +6,7 @@ the exchange receives only the full-size protective SL.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -206,6 +207,11 @@ def _verify_groq(signal: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _one_position_risk_policy():
+    """Use the V2 risk caps but limit this one-shot runner to one concurrent position."""
+    return replace(build_v2_demo_risk_policy(), max_concurrent_positions=1)
+
+
 def _tp1_price(entry: str, stop: str, side: str) -> str:
     e, s = Decimal(entry), Decimal(stop)
     risk = abs(e - s)
@@ -215,7 +221,7 @@ def _tp1_price(entry: str, stop: str, side: str) -> str:
 
 def main() -> int:
     report: dict[str, Any] = {
-        "idempotency_key": lock_key,
+        "idempotency_key": None,
         "environment": "BLOFIN_DEMO_ONLY",
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "strategy": "CHALLENGE_1_V2",
@@ -242,7 +248,7 @@ def main() -> int:
         client = BloFinDemoTradeClient()
         if client.base_url != DEMO_REST_URL:
             raise RuntimeError("Exchange host is not the pinned BloFin Demo REST endpoint")
-        executor = BloFinDemoExecutor(client=client, policy=build_v2_demo_risk_policy(), trading_enabled=True)
+        executor = BloFinDemoExecutor(client=client, policy=_one_position_risk_policy(), trading_enabled=True)
         recovered = executor.recover_unresolved_orders_from_journal()
         if recovered.get("status") != "RECONCILED" or int(recovered.get("remaining_unresolved", -1)) != 0:
             raise RuntimeError("Unresolved Demo order journal blocks one-shot entry")

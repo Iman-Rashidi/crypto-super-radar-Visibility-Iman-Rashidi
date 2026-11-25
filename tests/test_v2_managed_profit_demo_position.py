@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from scripts.v2_managed_profit_demo_position import (
     rank_top1_momentum, _tp1_price, SYMBOLS,
-    build_candle_idempotency_key, _claim_once,
+    build_candle_idempotency_key, _claim_once, _one_position_risk_policy,
 )
 
 
@@ -76,6 +76,13 @@ class ManagedProfitTop1Tests(unittest.TestCase):
             self.assertTrue(_claim_once(db, key_b))
         finally:
             db.close()
+
+    def test_one_shot_policy_limits_to_one_position_and_preserves_risk_caps(self):
+        policy = _one_position_risk_policy()
+        self.assertEqual(policy.max_concurrent_positions, 1)
+        self.assertEqual(policy.risk_per_trade_pct, 0.005)
+        self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
+        self.assertEqual(policy.max_leverage, 1)
 
     def test_tp1_target_uses_existing_v2_1_2r_rule(self):
         self.assertEqual(_tp1_price("100", "98", "LONG"), "102.4")
