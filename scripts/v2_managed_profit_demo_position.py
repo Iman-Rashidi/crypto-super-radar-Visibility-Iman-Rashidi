@@ -98,7 +98,24 @@ def rank_top1_momentum(client: Any, *, now_ms: int | None = None) -> list[dict[s
     return ranked
 
 
-def _claim_once(db: Any) -> bool:
+def _report_proves_no_entry(report_text: str) -> bool:
+    try:
+        report = json.loads(report_text or "{}")
+        cycle = report.get("v2_cycle") or {}
+        rows = cycle.get("symbols") or []
+        if cycle.get("orders_submitted") is not False or cycle.get("trade_executed") is not False:
+            return False
+        if len(rows) != 1 or not isinstance(rows[0], Mapping):
+            return False
+        selected = rows[0]
+        if selected.get("orders_submitted") is not False or selected.get("execution_result") is not None:
+            return False
+        return str(selected.get("status") or "") in {"AI_REVIEW_BLOCKED", "NO_TRADE", "SIGNAL_BLOCKED"}
+    except Exception:
+        return False
+
+
+def _claim_once(db: Any, *, safe_to_retry_no_entry: bool = False) -> bool:
     db.execute("""CREATE TABLE IF NOT EXISTS csr_managed_demo_position_once (
         lock_key TEXT PRIMARY KEY,
         status TEXT NOT NULL,
@@ -107,12 +124,32 @@ def _claim_once(db: Any) -> bool:
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""")
     db.commit()
-    cursor = db.execute(
-        "INSERT OR IGNORE INTO csr_managed_demo_position_once(lock_key,status,report_json) VALUES(?,?,?)",
-        (LOCK_KEY, "IN_PROGRESS", "{}"),
-    )
-    db.commit()
-    return int(getattr(cursor, "rowcount", 0) or 0) == 1
+    row = db.execute(
+        "SELECT status,report_json FROM csr_managed_demo_position_once WHERE lock_key=?",
+        (LOCK_KEY,),
+    ).fetchone()
+    if row is None:
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO csr_managed_demo_position_once(lock_key,status,report_json) VALUES(?,?,?)",
+            (LOCK_KEY, "IN_PROGRESS", "{}"),
+        )
+        db.commit()
+        return int(getattr(cursor, "rowcount", 0) or 0) == 1
+    if (
+        safe_to_retry_no_entry
+        and str(row[0]) in {"FAILED_OR_UNKNOWN_NO_RETRY", "NO_TRADE_RETRYABLE"}
+        and _report_proves_no_entry(str(row[1] or ""))
+    ):
+        db.execute(
+            "UPDATE csr_managed_demo_position_once SET status='IN_PROGRESS',report_json='{}',updated_at=CURRENT_TIMESTAMP WHERE lock_key=?",
+            (LOCK_KEY,),
+        )
+        db.commit()
+        check = db.execute(
+            "SELECT status FROM csr_managed_demo_position_once WHERE lock_key=?", (LOCK_KEY,)
+        ).fetchone()
+        return bool(check and str(check[0]) == "IN_PROGRESS")
+    return False
 
 
 def _save_report(db: Any, report: dict[str, Any], status: str) -> None:
@@ -190,9 +227,6 @@ def main() -> int:
     db = connect_database()
     executor = None
     try:
-        if not _claim_once(db):
-            print(json.dumps({"status": "DUPLICATE_SKIPPED", "idempotency_key": LOCK_KEY}))
-            return 0
         client = BloFinDemoTradeClient()
         if client.base_url != DEMO_REST_URL:
             raise RuntimeError("Exchange host is not the pinned BloFin Demo REST endpoint")
@@ -208,6 +242,9 @@ def main() -> int:
         ]
         if active_positions or pending_orders:
             raise RuntimeError("Existing Demo positions or pending orders block one-shot entry")
+        if not _claim_once(db, safe_to_retry_no_entry=True):
+            print(json.dumps({"status": "DUPLICATE_SKIPPED", "idempotency_key": LOCK_KEY}))
+            return 0
 
         ranked = rank_top1_momentum(client)
         winner = ranked[0]
@@ -237,10 +274,23 @@ def main() -> int:
         if len(rows) != 1:
             raise RuntimeError("V2 runner did not return exactly one candidate record")
         selected = rows[0]
-        report["groq"] = _verify_groq(selected)
         execution = selected.get("execution_result")
         if not selected.get("orders_submitted") or not isinstance(execution, Mapping):
-            raise RuntimeError("Formal V2 signal/Groq approval did not authorize a Demo entry")
+            review_items = selected.get("ai_reviews") or []
+            first_review = review_items[0].get("review") if review_items and isinstance(review_items[0], Mapping) else {}
+            report["groq"] = {
+                "status": "NOT_APPROVED_OR_NOT_CALLED",
+                "request_attempted": bool(isinstance(first_review, Mapping) and first_review.get("request_attempted") is True),
+                "http_status": first_review.get("http_status") if isinstance(first_review, Mapping) else None,
+                "model_verified": bool(isinstance(first_review, Mapping) and first_review.get("model_verified") is True),
+                "skip_reason_code": first_review.get("skip_reason_code") if isinstance(first_review, Mapping) else None,
+            }
+            report["status"] = "NO_TRADE_RETRYABLE"
+            report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+            _save_report(db, report, "NO_TRADE_RETRYABLE")
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), flush=True)
+            return 0
+        report["groq"] = _verify_groq(selected)
         if execution.get("environment") != "BLOFIN_DEMO":
             raise RuntimeError("Execution result is not explicitly BloFin Demo")
         if execution.get("status") != "FILLED":
