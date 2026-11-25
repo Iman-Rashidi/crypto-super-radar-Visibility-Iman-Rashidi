@@ -43,8 +43,8 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED || 'true' }}
-      # Scheduled worker manages existing exits only; the dedicated one-shot workflow owns entries.
-      CHALLENGE_1_V2_MANAGE_ONLY: "true"
+      # Easy Demo V2 worker may open entries under the four-slot executor cap; exit management remains active every cycle.
+      CHALLENGE_1_V2_MANAGE_ONLY: "false"
       CHALLENGE_1_V2_LEVERAGE: '1'
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
