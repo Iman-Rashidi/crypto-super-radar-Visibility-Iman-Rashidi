@@ -1729,3 +1729,61 @@ class V2WaveNormalizationRegressionTests(unittest.TestCase):
         prompt = _v2_prompt_messages(evidence)[0]["content"].lower()
         self.assertIn("advisory", prompt)
         self.assertIn("stop-loss", prompt)
+
+
+class V2EasyDemoNativeCouncilTests(unittest.TestCase):
+    def _record(self):
+        return {
+            "signal": "LONG",
+            "execution_profile": "CHALLENGE_1_V2",
+            "entry": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+            "regime": {"aligned_4h": False, "opposed_4h": True},
+            "challenge1_v2_evidence": {
+                "elliott_wave": {
+                    "phase": "NO_RULE_VALID_IMPULSE",
+                    "pattern": "AMBIGUOUS",
+                    "wave_alignment": "UNCONFIRMED",
+                }
+            },
+        }
+
+    def test_easy_demo_makes_4h_and_elliott_advisory_but_keeps_risk_geometry(self):
+        from unittest.mock import patch
+        from crypto_super_radar.ai_second_opinion import _challenge1_v2_native_review
+        with patch.dict("os.environ", {
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+        }), patch("crypto_super_radar.challenge1_v2.challenge1_v2_execution_evidence_ready",
+                  return_value=(True, "valid base evidence")):
+            review = _challenge1_v2_native_review(self._record())
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["easy_demo_entry_mode"])
+        self.assertTrue(review["elliott_is_advisory"])
+
+    def test_strict_mode_still_blocks_opposed_4h_context(self):
+        from unittest.mock import patch
+        from crypto_super_radar.ai_second_opinion import _challenge1_v2_native_review
+        with patch.dict("os.environ", {
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "false",
+        }), patch("crypto_super_radar.challenge1_v2.challenge1_v2_execution_evidence_ready",
+                  return_value=(True, "valid base evidence")):
+            review = _challenge1_v2_native_review(self._record())
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertFalse(review["easy_demo_entry_mode"])
+
+    def test_easy_demo_does_not_bypass_invalid_stop_geometry(self):
+        from unittest.mock import patch
+        from crypto_super_radar.ai_second_opinion import _challenge1_v2_native_review
+        record = self._record()
+        record["stop_loss"] = 101.0
+        with patch.dict("os.environ", {
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+        }), patch("crypto_super_radar.challenge1_v2.challenge1_v2_execution_evidence_ready",
+                  return_value=(True, "valid base evidence")):
+            review = _challenge1_v2_native_review(record)
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertIn("geometry", review["reason"])

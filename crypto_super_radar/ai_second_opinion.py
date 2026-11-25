@@ -365,11 +365,14 @@ def _is_challenge1_v2_result(result: Any) -> bool:
 
 def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
     """Validate the V2-only multi-timeframe/funding contract before any LLM call."""
-    from .challenge1_v2 import challenge1_v2_execution_evidence_ready
+    from .challenge1_v2 import (
+        challenge1_v2_execution_evidence_ready, _easy_demo_entry_enabled,
+    )
 
     record = _challenge1_result_record(result)
     regime = record.get("regime")
     aligned = isinstance(regime, Mapping) and regime.get("aligned_4h") is True
+    easy_demo_entry = _easy_demo_entry_enabled()
     if record.get("wave5_entry_active") is True:
         evidence = record.get("challenge1_v2_evidence") if isinstance(record.get("challenge1_v2_evidence"), Mapping) else {}
         wave = evidence.get("elliott_wave") if isinstance(evidence.get("elliott_wave"), Mapping) else {}
@@ -410,7 +413,7 @@ def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
             ready, reason = False, "W5 evidence contains invalid numeric fields"
     else:
         ready, reason = challenge1_v2_execution_evidence_ready(record)
-    if not aligned:
+    if not aligned and not easy_demo_entry:
         ready, reason = False, "V2 1H/4H directional alignment is not confirmed"
     side = str(record.get("signal") or "").strip().upper()
     entry = _safe_float(record.get("entry", record.get("entry_price")))
@@ -428,7 +431,13 @@ def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
     return {
         "version": "challenge1-v2-closed-mtf-funding-native-review-v1",
         "execution_profile": "CHALLENGE_1_V2",
-        "review_basis": "CLOSED_1H_4H_15M_CANDLES_AND_REGULAR_FUNDING_KIND_0",
+        "review_basis": (
+            "CLOSED_1H_4H_15M_CANDLES_WITH_4H_ADVISORY_AND_REGULAR_FUNDING_KIND_0"
+            if easy_demo_entry else
+            "CLOSED_1H_4H_15M_CANDLES_AND_REGULAR_FUNDING_KIND_0"
+        ),
+        "easy_demo_entry_mode": easy_demo_entry,
+        "elliott_is_advisory": easy_demo_entry,
         "required_timeframes": ["1H", "4H", "15m"],
         "status": status,
         "paper_entry_eligible": ready,
