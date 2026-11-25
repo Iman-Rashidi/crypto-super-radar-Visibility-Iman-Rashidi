@@ -76,8 +76,9 @@ jobs:
           python -m compileall -q crypto_super_radar/challenge1_v2_autopilot.py crypto_super_radar/challenge1_v2_orchestration.py crypto_super_radar/challenge1_v2.py crypto_super_radar/challenge1_v2_trade_controls.py tests/test_challenge1_v2_autopilot.py tests/test_challenge1_v2_funding.py tests/test_challenge1_v2_trade_controls.py tests/test_challenge1_v2_supervisor_failover.py tests/test_challenge1_v2_entry_rule.py
       - name: Run V2 worker and trade-control tests
         env:
-          # Unit tests must exercise the no-order path even when the live Demo cycle is enabled.
+          # Unit tests must isolate themselves from the live worker's manager-only runtime flags.
           BLOFIN_DEMO_TRADING_ENABLED: 'false'
+          CHALLENGE_1_V2_MANAGE_ONLY: 'false'
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_autopilot.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_supervisor_failover.py' -v
