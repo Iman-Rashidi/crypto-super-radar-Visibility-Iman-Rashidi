@@ -5,7 +5,7 @@ from decimal import Decimal
 from scripts.v2_managed_profit_demo_position import (
     rank_top1_momentum, _tp1_price, SYMBOLS,
     build_candle_idempotency_key, _claim_once, _one_position_risk_policy,
-    _report_proves_no_entry,
+    _report_proves_no_entry, _SingleEntryExecutor,
 )
 
 
@@ -84,6 +84,23 @@ class ManagedProfitTop1Tests(unittest.TestCase):
         self.assertEqual(policy.risk_per_trade_pct, 0.005)
         self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
         self.assertEqual(policy.max_leverage, 1)
+
+    def test_single_entry_executor_allows_only_one_attempt(self):
+        class FakeStore:
+            pass
+        class FakeExecutor:
+            store = FakeStore()
+            def __init__(self):
+                self.calls = 0
+            def execute(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"status": "FILLED"}
+        delegate = FakeExecutor()
+        guarded = _SingleEntryExecutor(delegate)
+        self.assertEqual(guarded.execute(), {"status": "FILLED"})
+        with self.assertRaisesRegex(RuntimeError, "attempt limit"):
+            guarded.execute()
+        self.assertEqual(delegate.calls, 1)
 
     def test_multiple_ranked_no_entry_records_are_safe_to_retry(self):
         import json

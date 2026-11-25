@@ -33,6 +33,20 @@ class _NoopNotifier:
         return None
 
 
+class _SingleEntryExecutor:
+    """Guard run_cycle so this one-shot runner can attempt at most one entry."""
+    def __init__(self, executor: Any):
+        self._executor = executor
+        self.store = executor.store
+        self.entry_attempted = False
+
+    def execute(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if self.entry_attempted:
+            raise RuntimeError("One-shot Demo entry attempt limit has already been consumed")
+        self.entry_attempted = True
+        return self._executor.execute(*args, **kwargs)
+
+
 def _rows(value: Any) -> list[Mapping[str, Any]]:
     if isinstance(value, Mapping):
         value = value.get("data", value)
@@ -287,8 +301,15 @@ def main() -> int:
         _save_report(db, report, "TOP1_SELECTED", lock_key)
 
         direction_by_symbol = {item["symbol"]: item["direction"] for item in ranked}
+        single_entry_executor = _SingleEntryExecutor(executor)
 
         def analyze_selected(exchange: Any, symbol: str) -> Mapping[str, Any]:
+            if single_entry_executor.entry_attempted:
+                return {
+                    "signal": "NO_TRADE", "status": "NO_TRADE",
+                    "reason": "The one-shot runner has already consumed its single entry attempt",
+                    "orders_submitted": False,
+                }
             expected_direction = direction_by_symbol.get(symbol)
             if expected_direction not in {"LONG", "SHORT"}:
                 raise RuntimeError("Runner attempted to analyze a symbol outside the ranked Demo candidate set")
@@ -305,7 +326,7 @@ def main() -> int:
         cycle = run_cycle(
             client, db, analyzer=analyze_selected,
             symbols=tuple(item["symbol"] for item in ranked),
-            executor=executor, environ=os.environ, notifier=_NoopNotifier(),
+            executor=single_entry_executor, environ=os.environ, notifier=_NoopNotifier(),
         )
         report["v2_cycle"] = cycle
         rows = cycle.get("symbols") or []
