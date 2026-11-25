@@ -724,6 +724,17 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
             )
         self.client._post.assert_not_called()
 
+    def test_cancel_tpsl_posts_only_the_exact_tpsl_id(self):
+        self.session.post.return_value = FakeResponse({
+            "code": "0", "data": [{"code": "0", "tpslId": "101"}]
+        })
+        with patch("crypto_super_radar.blofin_demo_executor._wait_for_trade_write_slot"):
+            result = self.client.cancel_tpsl_order(inst_id="BTC-USDT", tpsl_id="101")
+        self.assertEqual(result["code"], "0")
+        body = json.loads(self.session.post.call_args.kwargs["data"])
+        self.assertEqual(body, [{"instId": "BTC-USDT", "tpslId": "101"}])
+        self.assertIn(self.client.CANCEL_TPSL_PATH, self.client.ALLOWED_POST_PATHS)
+
     def test_amend_sl_in_place_and_verify_active_exchange_protection(self):
         self._configure_net_position()
         active = [{

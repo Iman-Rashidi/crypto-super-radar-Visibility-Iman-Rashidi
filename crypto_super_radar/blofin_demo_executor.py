@@ -750,8 +750,9 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
     AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
+    CANCEL_TPSL_PATH = "/api/v1/trade/cancel-tpsl"
     ALLOWED_POST_PATHS = frozenset({
-        ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH,
+        ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH, CANCEL_TPSL_PATH,
     })
 
     def __init__(self, **kwargs: Any) -> None:
@@ -777,7 +778,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         self._trade_permission_verified = True
         return {"readOnly": 0, "trade_permission": True}
 
-    def _post(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, body: Mapping[str, Any] | list[Mapping[str, Any]]) -> dict[str, Any]:
         if path not in self.ALLOWED_POST_PATHS:
             raise BloFinDemoExecutionBlocked("POST endpoint is not allow-listed.")
         if self.base_url != DEMO_REST_URL:
@@ -789,7 +790,9 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             self.verify_trade_permission()
         timestamp = str(int(self.clock_ms()))
         nonce = str(uuid.uuid4())
-        body_text = json.dumps(dict(body), separators=(",", ":"), ensure_ascii=False)
+        if not isinstance(body, (Mapping, list)):
+            raise TypeError("BloFin POST body must be an object or an array of objects.")
+        body_text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
         headers = {
             "ACCESS-KEY": self.api_key,
             "ACCESS-SIGN": _signature(self.api_secret, "POST", path, timestamp, nonce, body_text),
@@ -998,6 +1001,15 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             "clientOrderId": client_order_id,
         }
         return self._post(self.ORDER_PATH, body)
+
+    def cancel_tpsl_order(self, *, inst_id: str, tpsl_id: str) -> dict[str, Any]:
+        """Cancel one exact orphaned exchange TP/SL order by its BloFin TPSL ID."""
+        if not str(inst_id).strip() or not str(tpsl_id).strip():
+            raise ValueError("inst_id and tpsl_id are required.")
+        return self._post(
+            self.CANCEL_TPSL_PATH,
+            [{"instId": str(inst_id).strip(), "tpslId": str(tpsl_id).strip()}],
+        )
 
     def amend_or_replace_sl(
         self, *, inst_id: str, tpsl_id: str, new_stop_loss: str,
