@@ -494,7 +494,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         reviewer_two.assert_called_once()
         self.assertEqual(len(self.store.recorded), 1)
 
-    def test_gated_v2_single_shot_runs_real_executor_and_post_fill_tpsl_verification(self):
+    def test_gated_v2_single_shot_runs_real_executor_and_post_fill_sl_only_verification(self):
         store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
         close_store = store.close
@@ -540,8 +540,10 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         self.assertTrue(result["trade_executed"])
         self.assertTrue(result["post_fill_tp_sl_verified"])
         self.assertEqual(result["position_id"], trade_client.position_id)
-        self.assertEqual(result["protection"]["tp_verified"], True)
+        self.assertEqual(result["protection"]["tp_required"], False)
+        self.assertEqual(result["protection"]["tp_verified"], False)
         self.assertEqual(result["protection"]["sl_verified"], True)
+        self.assertIsNone(trade_client.order_args["take_profit"])
         self.assertEqual(
             sum(1 for call in trade_client.calls if isinstance(call, tuple) and call[0] == "place_order"),
             1,
