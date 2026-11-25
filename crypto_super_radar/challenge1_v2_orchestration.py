@@ -19,6 +19,7 @@ from .ai_supervisor import run_challenge1_v2_supervisor_reviews
 from .challenge1_v2 import (
     analyze_signal, build_fast_trigger_signal, build_early_wave3_signal,
     challenge1_v2_execution_evidence_ready, rsi_divergence_entry_guard,
+    _easy_demo_entry_enabled,
     calculate_wave4_fibonacci, breakout_volume_confirmation, build_wave5_entry_signal,
 )
 from .challenge1_strategy import analyze_blofin_challenge1
@@ -347,9 +348,10 @@ def analyze_challenge1_v2_market(
             )
         except Exception as exc:
             wave5_path = {"signal": "NO_TRADE", "reason": "W5 entry detector unavailable: " + type(exc).__name__}
-    if early_w3_path.get("signal") in {"LONG", "SHORT"}:
+    easy_demo_entry = _easy_demo_entry_enabled()
+    if not easy_demo_entry and early_w3_path.get("signal") in {"LONG", "SHORT"}:
         record = early_w3_path
-    elif wave5_path.get("signal") in {"LONG", "SHORT"}:
+    elif not easy_demo_entry and wave5_path.get("signal") in {"LONG", "SHORT"}:
         base_regime = record.get("regime") if isinstance(record.get("regime"), Mapping) else {}
         if (
             str(base_regime.get("direction") or "").upper() == str(wave5_path.get("signal")).upper()
@@ -362,7 +364,7 @@ def analyze_challenge1_v2_market(
         else:
             wave5_path = {"signal": "NO_TRADE", "reason": "W5 setup lacks aligned 1H/4H context"}
     fast_path = None
-    if not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
+    if not easy_demo_entry and not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
         try:
             fast_path = build_fast_trigger_signal(
                 instrument_id=symbol,
@@ -383,6 +385,7 @@ def analyze_challenge1_v2_market(
         if fast_path.get("signal") in {"LONG", "SHORT"}:
             record = fast_path
     record = dict(record)
+    record["easy_demo_entry_mode"] = easy_demo_entry
     record["wave4_fibonacci"] = calculate_wave4_fibonacci(frame_5m) if fast_ohlcv_ready else {"status": "UNAVAILABLE", "levels": {}}
     if record.get("fast_trigger_active") and fast_ohlcv_ready:
         side = str(record["signal"]).upper()

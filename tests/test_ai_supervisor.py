@@ -183,3 +183,50 @@ class MultiProviderSupervisorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Challenge1V2EasyDemoGroqApprovalTests(unittest.TestCase):
+    def test_single_verified_groq_can_approve_with_elliott_as_advisory_context(self):
+        from types import SimpleNamespace
+        from crypto_super_radar.ai_supervisor import run_challenge1_v2_supervisor_reviews
+
+        review = {
+            "provider": "Groq",
+            "model": "openai/gpt-oss-20b",
+            "returned_model": "openai/gpt-oss-20b",
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
+            "expected_side": "LONG",
+            "trader_proposal": "LONG",
+            "elliott_wave_phase": "NO_RULE_VALID_IMPULSE",
+            "elliott_wave_direction": "AMBIGUOUS",
+        }
+        analysis = SimpleNamespace(
+            signal="LONG",
+            metrics={
+                "execution_profile": "CHALLENGE_1_V2",
+                "challenge1_v2_evidence": {
+                    "elliott_wave": {
+                        "phase": "NO_RULE_VALID_IMPULSE",
+                        "pattern": "AMBIGUOUS",
+                        "wave_alignment": "UNCONFIRMED",
+                    }
+                },
+            },
+        )
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+        }), patch("crypto_super_radar.ai_supervisor._ai.run_independent_ai_supervisor",
+                  return_value=review):
+            result = run_challenge1_v2_supervisor_reviews(
+                analysis, "perp:BTCUSDT", signal_id="easy-demo-test"
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_GROQ")
+        self.assertTrue(result["ai_consensus"]["single_reviewer_approval"])
+        self.assertTrue(result["ai_consensus"]["elliott_is_advisory"])

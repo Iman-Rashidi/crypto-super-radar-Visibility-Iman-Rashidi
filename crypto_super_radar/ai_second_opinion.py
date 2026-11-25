@@ -957,6 +957,7 @@ def _public_v2_evidence(value: Any) -> dict[str, Any]:
         "context_4h_candle_open_utc", "context_15m_candle_open_utc",
         "data_asof_utc", "funding_rate", "funding_kind", "funding_event_time_ms",
         "funding_max_age_ms", "wave_alignment", "setup_timeframe",
+        "easy_demo_entry_mode", "elliott_is_advisory",
     }
     result = _public_v2_scalar_fields(value, allowed)
     if isinstance(value, Mapping):
@@ -1015,6 +1016,8 @@ def _build_v2_review_input(result: Any, asset: Any, metrics: Mapping[str, Any]) 
         "expected_side": str(record.get("signal") or "UNKNOWN").upper(),
         "execution_profile": "CHALLENGE_1_V2",
         "review_mode": "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW",
+        "easy_demo_entry_mode": evidence.get("easy_demo_entry_mode") is True,
+        "elliott_is_advisory": evidence.get("elliott_is_advisory") is True,
         "signal_id": str(record.get("signal_id") or ""),
         "entry_price": _safe_float(record.get("entry")),
         "stop_loss": _safe_float(record.get("stop_loss")),
@@ -1102,54 +1105,89 @@ def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     wave = evidence.get("elliott_wave") or {}
     phase = str(wave.get("phase") or "UNKNOWN")
     direction = str(wave.get("pattern") or "UNKNOWN")
-    system = (
-        "You are an independent technical and risk supervisor for a BloFin Demo V2 research system. "
-        "This is CHALLENGE_1_V2, not the legacy 5m strategy. Use only the supplied closed-candle proof, "
-        "1H/4H regime metrics, 15m execution metrics, exact funding evidence and confirmed numeric 1H Elliott pivots. "
-        "Never ask for or infer 5m data, never fall back to the legacy path, and do not invent missing candles, "
-        "funding events, account facts, prices or wave pivots. The latest funding event must be regular fundingKind=0. "
-        "Any missing/stale timeframe, missing 4H alignment, invalid funding proof, unconfirmed/contradictory wave, "
-        "bad protective levels, or disagreement means no approval. Echo the exact supplied Elliott phase and direction. "
-        "Expected side: " + side + ". Supplied wave phase: " + phase + ". Supplied wave direction: " + direction + ". "
-        "The top-level JSON keys elliott_wave_phase, elliott_wave_direction, and expected_side are REQUIRED. "
-        "Set them to the exact canonical values supplied here, without paraphrasing: "
-        "elliott_wave_phase=" + phase + "; elliott_wave_direction=" + direction + "; expected_side=" + side + ". "
-        "Allowed phase tokens are WAVES_1_AND_2_CONFIRMED, WAVE_3_CONFIRMED, WAVE_4_CONFIRMED, FIVE_WAVE_IMPULSE_CONFIRMED. "
-        "Allowed direction tokens are BULLISH or BEARISH; expected_side must be LONG or SHORT. "
-        "Return exactly one JSON object, no markdown, using this schema: "
-        '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
-        '"market_regime":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
-        '"technical":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
-        '"news_sentiment":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
-        '"bull_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
-        '"bear_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
-        '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
-        '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
-        '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."}},'
-        '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
-        '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
-        '"risk_flags":["..."],"rationale_fa":"..."} '
-        "Every specialist_views role and wave_analyst is REQUIRED; never omit a role. "
-        "If evidence is insufficient, use UNKNOWN/UNCERTAIN/INSUFFICIENT_DATA for the specialist verdicts and explain why; never invent a positive view. "
-        "Regardless of the verdict, always echo the supplied canonical values exactly in the three top-level keys and in wave_analyst.phase/direction. "
-        "Do not replace a known supplied phase or direction with UNKNOWN. "
-        "The following is a complete fail-closed JSON shape example. Copy every key, but replace specialist verdicts using the supplied evidence; "
-        "the example is not an approval: "
-        '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
-        '"market_regime":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
-        '"technical":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
-        '"news_sentiment":{"view":"UNKNOWN","reason_fa":"داده کافی نیست."},'
-        '"bull_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
-        '"bear_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
-        '"trader":{"proposal":"NO_TRADE","reason_fa":"جهت معتبر نیست."},'
-        '"risk_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک قابل تأیید نیست."},'
-        '"portfolio_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک پرتفوی قابل تأیید نیست."}},'
-        '"wave_analyst":{"verdict":"UNCERTAIN","phase":"' + phase + '","direction":"' + direction + '","reason_fa":"موج مستقل تأیید نشده است."},'
-        '"final_rating":"REVIEW","risk_flags":["INSUFFICIENT_EVIDENCE"],'
-        '"rationale_fa":"تا رفع کمبود شواهد، ورود تأیید نمی‌شود."}'
-        " Approve only when every required V2 input is internally consistent, the higher-timeframe regime aligns, "
-        "the exact Elliott phase/direction is confirmed and matches the intended side, and the protective plan is valid."
-    )
+    easy_demo_entry = evidence.get("easy_demo_entry_mode") is True
+    if easy_demo_entry:
+        system = (
+            "You are the sole independent Groq technical and risk supervisor for a BloFin Demo V2 test. "
+            "Assess the supplied completed-candle direction, 15m EMA21 slope, RSI, candle momentum, "
+            "entry/stop-loss/take-profit geometry, reward-to-risk, funding freshness and spread. "
+            "Elliott-wave phase/alignment, 4H alignment and BTC master direction are advisory context only "
+            "in this explicitly marked Easy Demo mode. Do not reject solely because Elliott is UNKNOWN, "
+            "AMBIGUOUS, NO_RULE_VALID_IMPULSE or OPPOSED, or because 4H/BTC context is opposed. "
+            "This does not waive missing/stale market data, invalid/future candle timestamps, missing funding, "
+            "excessive spread, invalid stop/target geometry, inadequate reward-to-risk, a risk-manager rejection, "
+            "a portfolio-manager rejection, a conflicting trader direction, or material risk flags. "
+            "Do not invent account facts, fills, prices or protective orders. Review only the supplied plan. "
+            "Expected side: " + side + ". Return one JSON object with all required specialist_views roles: "
+            "market_regime, technical, news_sentiment, bull_researcher, bear_researcher, trader, "
+            "risk_manager and portfolio_manager. Include wave_analyst as advisory; UNCERTAIN/UNKNOWN is valid. "
+            "The trader proposal must equal the expected side; risk_manager and portfolio_manager must APPROVE; "
+            "final_rating must support the side and risk_flags must be empty to approve. "
+            "Echo expected_side exactly. Return JSON only, no markdown. Schema: "
+            '{"expected_side":"' + side + '","specialist_views":{'
+            '"market_regime":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"technical":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"news_sentiment":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"bull_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+            '"bear_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+            '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
+            '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+            '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."}},'
+            '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"UNKNOWN or supplied phase",'
+            '"direction":"UNKNOWN or supplied direction","reason_fa":"..."},'
+            '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
+            '"risk_flags":[],"rationale_fa":"..."}'
+        )
+    else:
+        system = (
+            "You are an independent technical and risk supervisor for a BloFin Demo V2 research system. "
+            "This is CHALLENGE_1_V2, not the legacy 5m strategy. Use only the supplied closed-candle proof, "
+            "1H/4H regime metrics, 15m execution metrics, exact funding evidence and confirmed numeric 1H Elliott pivots. "
+            "Never ask for or infer 5m data, never fall back to the legacy path, and do not invent missing candles, "
+            "funding events, account facts, prices or wave pivots. The latest funding event must be regular fundingKind=0. "
+            "Any missing/stale timeframe, missing 4H alignment, invalid funding proof, unconfirmed/contradictory wave, "
+            "bad protective levels, or disagreement means no approval. Echo the exact supplied Elliott phase and direction. "
+            "Expected side: " + side + ". Supplied wave phase: " + phase + ". Supplied wave direction: " + direction + ". "
+            "The top-level JSON keys elliott_wave_phase, elliott_wave_direction, and expected_side are REQUIRED. "
+            "Set them to the exact canonical values supplied here, without paraphrasing: "
+            "elliott_wave_phase=" + phase + "; elliott_wave_direction=" + direction + "; expected_side=" + side + ". "
+            "Allowed phase tokens are WAVES_1_AND_2_CONFIRMED, WAVE_3_CONFIRMED, WAVE_4_CONFIRMED, FIVE_WAVE_IMPULSE_CONFIRMED. "
+            "Allowed direction tokens are BULLISH or BEARISH; expected_side must be LONG or SHORT. "
+            "Return exactly one JSON object, no markdown, using this schema: "
+            '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
+            '"market_regime":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"technical":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"news_sentiment":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+            '"bull_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+            '"bear_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+            '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
+            '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+            '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."}},'
+            '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
+            '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
+            '"risk_flags":["..."],"rationale_fa":"..."} '
+            "Every specialist_views role and wave_analyst is REQUIRED; never omit a role. "
+            "If evidence is insufficient, use UNKNOWN/UNCERTAIN/INSUFFICIENT_DATA for the specialist verdicts and explain why; never invent a positive view. "
+            "Regardless of the verdict, always echo the supplied canonical values exactly in the three top-level keys and in wave_analyst.phase/direction. "
+            "Do not replace a known supplied phase or direction with UNKNOWN. "
+            "The following is a complete fail-closed JSON shape example. Copy every key, but replace specialist verdicts using the supplied evidence; "
+            "the example is not an approval: "
+            '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
+            '"market_regime":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
+            '"technical":{"view":"UNKNOWN","reason_fa":"شواهد کافی نیست."},'
+            '"news_sentiment":{"view":"UNKNOWN","reason_fa":"داده کافی نیست."},'
+            '"bull_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
+            '"bear_researcher":{"view":"UNCERTAIN","reason_fa":"سناریو تأیید نشده است."},'
+            '"trader":{"proposal":"NO_TRADE","reason_fa":"جهت معتبر نیست."},'
+            '"risk_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک قابل تأیید نیست."},'
+            '"portfolio_manager":{"verdict":"INSUFFICIENT_DATA","reason_fa":"ریسک پرتفوی قابل تأیید نیست."}},'
+            '"wave_analyst":{"verdict":"UNCERTAIN","phase":"' + phase + '","direction":"' + direction + '","reason_fa":"موج مستقل تأیید نشده است."},'
+            '"final_rating":"REVIEW","risk_flags":["INSUFFICIENT_EVIDENCE"],'
+            '"rationale_fa":"تا رفع کمبود شواهد، ورود تأیید نمی‌شود."}'
+            " Approve only when every required V2 input is internally consistent, the higher-timeframe regime aligns, "
+            "the exact Elliott phase/direction is confirmed and matches the intended side, and the protective plan is valid."
+        )
+    
     user = "Review only this sanitized completed-candle V2 evidence:\\n" + json.dumps(
         evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
     )
@@ -1604,51 +1642,59 @@ def _validated_v2_review(
     expected_wave = expected_wave if isinstance(expected_wave, Mapping) else {}
     expected_phase = _normalize_v2_phase(expected_wave.get("phase"))
     expected_direction = _normalize_v2_direction(expected_wave.get("pattern"))
+    easy_demo_entry = evidence.get("easy_demo_entry_mode") is True
     wave_review = document.get("wave_analyst")
-    if not isinstance(wave_review, Mapping):
+    if not isinstance(wave_review, Mapping) and not easy_demo_entry:
         raise ValueError("V2 Elliott reviewer evidence is missing")
-    wave_review = dict(wave_review)
+    wave_review = dict(wave_review) if isinstance(wave_review, Mapping) else {}
     wave_verdict = str(wave_review.get("verdict") or "").strip().upper().replace(" ", "_")
     supplied_phase = _normalize_v2_phase(wave_review.get("phase"))
     supplied_direction = _normalize_v2_direction(wave_review.get("direction"))
     phase_was_echoed = bool(supplied_phase)
     direction_was_echoed = bool(supplied_direction)
-    # A model may omit the repeated labels after explicitly supporting the
-    # Elliott analyst. Fill only those missing labels from deterministic input
-    # evidence, and only after the remaining specialist schema is APPROVED.
-    if expected_phase not in {
-        "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
-        "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
-    } or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH"):
-        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
-    if wave_verdict in {"UNCERTAIN", "UNKNOWN", "INSUFFICIENT_DATA"}:
-        raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
-    if wave_verdict != "SUPPORT":
-        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
-    if result.get("status") == "APPROVED":
-        supplied_phase = supplied_phase or expected_phase
-        supplied_direction = supplied_direction or expected_direction
-    if not supplied_phase or not supplied_direction:
-        raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
-    if supplied_phase != expected_phase or supplied_direction != expected_direction:
-        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
-    for key, canonical, normalizer in (
-        ("elliott_wave_phase", expected_phase, _normalize_v2_phase),
-        ("elliott_wave_direction", expected_direction, _normalize_v2_direction),
-        ("expected_side", expected_side, _normalize_v2_side),
-    ):
-        echoed = document.get(key)
-        if echoed not in (None, "") and normalizer(echoed) != canonical:
+    if not easy_demo_entry:
+        # Strict mode still requires an independently confirmed Elliott structure.
+        if expected_phase not in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        } or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH"):
             raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+        if wave_verdict in {"UNCERTAIN", "UNKNOWN", "INSUFFICIENT_DATA"}:
+            raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
+        if wave_verdict != "SUPPORT":
+            raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+        if result.get("status") == "APPROVED":
+            supplied_phase = supplied_phase or expected_phase
+            supplied_direction = supplied_direction or expected_direction
+        if not supplied_phase or not supplied_direction:
+            raise ValueError("V2 Elliott reviewer did not independently confirm the supplied wave evidence")
+        if supplied_phase != expected_phase or supplied_direction != expected_direction:
+            raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+        for key, canonical, normalizer in (
+            ("elliott_wave_phase", expected_phase, _normalize_v2_phase),
+            ("elliott_wave_direction", expected_direction, _normalize_v2_direction),
+            ("expected_side", expected_side, _normalize_v2_side),
+        ):
+            echoed = document.get(key)
+            if echoed not in (None, "") and normalizer(echoed) != canonical:
+                raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+    else:
+        echoed_side = document.get("expected_side")
+        if echoed_side not in (None, "") and _normalize_v2_side(echoed_side) != expected_side:
+            raise ValueError("Groq expected-side echo conflicts with the requested trade direction")
+        if wave_verdict and wave_verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN", "UNKNOWN", "INSUFFICIENT_DATA"}:
+            raise ValueError("Easy Demo Elliott advisory verdict is malformed")
     result.update({
         "elliott_wave_phase": expected_phase,
         "elliott_wave_direction": expected_direction,
         "expected_side": expected_side,
         "wave_echo_source": (
+            "ADVISORY_CONTEXT" if easy_demo_entry else
             "MODEL_ECHO" if phase_was_echoed and direction_was_echoed
             else "PARTIAL_MODEL_ECHO_WITH_INPUT_EVIDENCE" if phase_was_echoed or direction_was_echoed
             else "INPUT_EVIDENCE_FALLBACK"
         ),
+        "elliott_is_advisory": easy_demo_entry,
         "execution_profile": "CHALLENGE_1_V2",
     })
     return result

@@ -1,9 +1,7 @@
-"""Independent multi-provider AI supervision for guarded paper/demo entries.
+"""Guarded AI supervision for Demo entries.
 
-No provider can approve a new entry alone. At least two independent providers
-must return a model-verified, schema-validated approval. Any valid veto wins.
-Only free-tier model IDs/endpoints are configured here; keep provider accounts
-on their Free tiers and never attach billing for this zero-cost configuration.
+Challenge 1 V2 uses one verified Groq reviewer. Other legacy supervision paths
+retain their independent-provider quorum. Any valid reviewer veto wins.
 """
 from __future__ import annotations
 
@@ -429,7 +427,12 @@ def run_challenge1_v2_supervisor_reviews(
         and str(groq.get("model") or "").strip()
         and str(groq.get("returned_model") or "").strip()
     )
-    wave_match = (
+    easy_demo_entry = (
+        execution_profile == "CHALLENGE_1_V2"
+        and os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "").strip().lower() == "true"
+        and os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+    )
+    wave_match = easy_demo_entry or (
         groq.get("elliott_wave_phase") == expected_wave_phase
         and groq.get("elliott_wave_direction") == expected_wave_direction
     )
@@ -449,11 +452,16 @@ def run_challenge1_v2_supervisor_reviews(
     )
     approved = (
         expected_side in {"LONG", "SHORT"}
-        and expected_wave_phase in {
-            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
-            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
-        }
-        and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+        and (
+            easy_demo_entry
+            or (
+                expected_wave_phase in {
+                    "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+                    "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+                }
+                and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+            )
+        )
         and provider_is_groq and model_is_groq_allowlisted
         and verified and wave_match and side_match
         and _demo_ai_review_approved(groq)
@@ -466,7 +474,11 @@ def run_challenge1_v2_supervisor_reviews(
     elif approved:
         consensus_status = "APPROVED_BY_GROQ"
         decision = "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER"
-        status_fa = "ناظر Groq پاسخ زنده، مدل و شواهد موج و جهت را تأیید کرد؛ تمام کنترل‌های قطعی Executor همچنان اجباری هستند."
+        status_fa = (
+            "ناظر Groq پاسخ زنده، جهت و ریسک را تأیید کرد؛ Elliott/4H در Easy Demo صرفاً زمینه نظارتی‌اند و کنترل‌های قطعی Executor اجباری هستند."
+            if easy_demo_entry else
+            "ناظر Groq پاسخ زنده، مدل و شواهد موج و جهت را تأیید کرد؛ تمام کنترل‌های قطعی Executor همچنان اجباری هستند."
+        )
     elif reviewer_status in {"NOT_CONFIGURED", "SECOND_AI_NOT_CONFIGURED"}:
         consensus_status = "NOT_CONFIGURED"
         decision = "BLOCK_DEMO_ENTRY"
@@ -504,6 +516,8 @@ def run_challenge1_v2_supervisor_reviews(
         "expected_side": expected_side,
         "elliott_wave_phase": expected_wave_phase,
         "elliott_wave_direction": expected_wave_direction,
+        "easy_demo_entry_mode": easy_demo_entry,
+        "elliott_is_advisory": easy_demo_entry,
         "two_reviewer_approval": False,
         "single_reviewer_demo_failover": False,
         "single_groq_reviewer_approval": approved,

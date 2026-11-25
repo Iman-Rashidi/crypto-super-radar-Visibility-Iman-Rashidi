@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import sqlite3
 import unittest
 from crypto_super_radar.challenge1_v2_autopilot import SYMBOLS,TABLE,preflight_errors,run_cycle,manage_open_positions,build_v2_demo_risk_policy
@@ -357,3 +358,77 @@ class Challenge1V2ManagerOnlyModeTests(unittest.TestCase):
             db.close()
 
 
+
+
+class Challenge1V2EasyDemoEntryModeTests(unittest.TestCase):
+    def _wave(self, phase="NO_RULE_VALID_IMPULSE", alignment="UNCONFIRMED"):
+        status = "CANDIDATE" if alignment == "OPPOSED" else "AMBIGUOUS"
+        pattern = "BEARISH" if alignment == "OPPOSED" else "AMBIGUOUS"
+        return {
+            "status": status, "pattern": pattern, "phase": phase,
+            "wave_alignment": alignment, "timeframe": "1H",
+            "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+            "data_asof_utc": "2026-11-25T18:00:00+00:00",
+            "latest_closed_candle_open_utc": "2026-11-25T17:00:00+00:00",
+            "confirmed_pivot_count": 2, "pivots": [],
+        }
+
+    def test_ambiguous_or_opposed_elliott_is_advisory_only_in_demo_mode(self):
+        from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
+        helper = Challenge1V2ElliottDiagnosticsRegressionTests()
+        for wave in (
+            self._wave("NO_RULE_VALID_IMPULSE", "UNCONFIRMED"),
+            self._wave("WAVE_3_CONFIRMED", "OPPOSED"),
+        ):
+            record = helper._record(wave)
+            with patch.dict(os.environ, {
+                "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+                "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            }):
+                ready, reason = challenge1_v2_execution_evidence_ready(record)
+            self.assertTrue(ready, reason)
+
+    def test_elliott_remains_blocking_outside_demo_mode(self):
+        from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
+        record = Challenge1V2ElliottDiagnosticsRegressionTests()._record(
+            self._wave("NO_RULE_VALID_IMPULSE", "UNCONFIRMED")
+        )
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "false",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+        }):
+            ready, reason = challenge1_v2_execution_evidence_ready(record)
+        self.assertFalse(ready)
+        self.assertIn("no_rule_valid_impulse", reason)
+
+    def test_low_adx_can_use_directional_ema_only_in_demo_mode(self):
+        from crypto_super_radar import challenge1_v2 as strategy
+        i1 = pd.date_range("2026-11-01", periods=210, freq="1h", tz="UTC")
+        i4 = pd.date_range("2026-10-01", periods=210, freq="4h", tz="UTC")
+        c1 = pd.Series([100.0 + n * 0.2 for n in range(210)], index=i1)
+        h1 = pd.DataFrame({"open": c1 - .05, "high": c1 + .1, "low": c1 - .1,
+                           "close": c1, "volume": 100.0}, index=i1)
+        c4 = pd.Series([200.0] * 210, index=i4)
+        h4 = pd.DataFrame({"open": c4, "high": c4 + .1, "low": c4 - .1,
+                           "close": c4, "volume": 100.0}, index=i4)
+        with patch.object(strategy, "adx", return_value=pd.Series([15.0] * 210, index=i1)), patch.dict(
+            os.environ, {"CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+                         "BLOFIN_DEMO_TRADING_ENABLED": "true"}
+        ):
+            regime = strategy._regime(h1, h4, i1[-1] + pd.Timedelta(hours=1))
+        self.assertEqual(regime["status"], "TREND")
+        self.assertEqual(regime["direction"], "LONG")
+        self.assertEqual(regime["adx_1h"], 15.0)
+
+    def test_btc_opposition_is_advisory_only_in_demo_mode(self):
+        from crypto_super_radar.challenge1_v2 import _btc_master_guard_allows_entry
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+        }):
+            self.assertTrue(_btc_master_guard_allows_entry(False))
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "false",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+        }):
+            self.assertFalse(_btc_master_guard_allows_entry(False))

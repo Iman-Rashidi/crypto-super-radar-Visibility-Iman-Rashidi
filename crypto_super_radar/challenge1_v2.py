@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 import math
+import os
 import numpy as np
 import pandas as pd
 from .elliott_waves import monitor_elliott_waves
@@ -15,6 +16,19 @@ from .challenge1_strategy import challenge1_entry_evidence_ready
 MAX_STOP_DISTANCE_PCT = 0.035
 MIN_ADX_1H = 18.0
 MIN_ENTRY_SCORE = 62.0
+
+
+def _easy_demo_entry_enabled() -> bool:
+    """Enable advisory-only context gates exclusively for explicitly enabled BloFin Demo."""
+    return (
+        str(os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "")).strip().lower() == "true"
+    )
+
+
+def _btc_master_guard_allows_entry(btc_aligned: bool) -> bool:
+    """BTC opposition is advisory in Easy Demo mode; missing BTC data remains blocking."""
+    return bool(btc_aligned) or _easy_demo_entry_enabled()
 
 
 def adx_meets_entry_threshold(value: float) -> bool:
@@ -280,7 +294,7 @@ def _regime(
     if any(pd.isna(x) or not math.isfinite(float(x)) for x in vals):
         return {"status": "UNKNOWN", "direction": "NONE", "reason": "1H indicator warm-up incomplete"}
     strength = float(adx14.iloc[-1])
-    if not adx_meets_entry_threshold(strength):
+    if not adx_meets_entry_threshold(strength) and not _easy_demo_entry_enabled():
         return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 18"}
     # ADX confirms trend strength; close location versus both fast EMAs sets direction.
     # HH/HL or LL/LH remains measurable confluence, never a standalone hard gate.
@@ -871,7 +885,7 @@ def build_fast_trigger_signal(
         if side == "LONG" else
         float(btc["close"].iloc[-1]) < float(btc_ema21.iloc[-1]) and btc_change < 0.008
     )
-    if not btc_ok:
+    if not _btc_master_guard_allows_entry(btc_ok):
         return {"signal": "NO_TRADE", "reason": "Fast trigger BTC master guard blocked the setup"}
 
     entry = float(fast_trigger_record.get("entry_price_usd") or 0)
@@ -1050,8 +1064,8 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     """Preflight V2 analysis evidence; this function never authorizes an order.
 
     The Demo executor must still obtain current contract/quote/account facts,
-    durable reservation, protective-order readiness and two independent,
-    signal-bound AI approvals before any order write.
+    durable reservation, protective-order readiness and a valid signal-bound
+    Groq approval before any order write.
     """
     if not isinstance(record, Mapping):
         return False, "V2 analysis record is missing."
@@ -1184,19 +1198,21 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         wave_checks.append("data_asof_utc_mismatch")
     if wave_candle_open != h1_open:
         wave_checks.append("latest_closed_candle_open_utc_mismatch")
-    if wave_alignment == "OPPOSED":
-        wave_checks.append("wave_alignment_opposed")
-    if phase == "NO_RULE_VALID_IMPULSE":
-        wave_checks.append("no_rule_valid_impulse")
-    if not wave_unconfirmed:
-        if wave_status not in {"CANDIDATE", "CONFIRMED"}:
-            wave_checks.append("confirmed_wave_status_invalid")
-        if wave_pattern != expected_pattern:
-            wave_checks.append("wave_pattern_does_not_match_signal")
-        if phase not in allowed_phases:
-            wave_checks.append("confirmed_wave_phase_invalid")
-        if wave_alignment != "ALIGNED":
-            wave_checks.append("confirmed_wave_alignment_not_aligned")
+    easy_demo_entry = _easy_demo_entry_enabled()
+    if not easy_demo_entry:
+        if wave_alignment == "OPPOSED":
+            wave_checks.append("wave_alignment_opposed")
+        if phase == "NO_RULE_VALID_IMPULSE":
+            wave_checks.append("no_rule_valid_impulse")
+        if not wave_unconfirmed:
+            if wave_status not in {"CANDIDATE", "CONFIRMED"}:
+                wave_checks.append("confirmed_wave_status_invalid")
+            if wave_pattern != expected_pattern:
+                wave_checks.append("wave_pattern_does_not_match_signal")
+            if phase not in allowed_phases:
+                wave_checks.append("confirmed_wave_phase_invalid")
+            if wave_alignment != "ALIGNED":
+                wave_checks.append("confirmed_wave_alignment_not_aligned")
     if wave_checks:
         details = {
             "checks": wave_checks,
@@ -1215,7 +1231,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
             "confirmed_pivot_count": wave.get("confirmed_pivot_count"),
         }
         return False, "V2 Elliott evidence rejected: " + repr(details)
-    if not wave_unconfirmed:
+    if not easy_demo_entry and not wave_unconfirmed:
         try:
             pivot_count = int(wave.get("confirmed_pivot_count"))
             invalidation = float(wave.get("invalidation_price"))
@@ -1427,7 +1443,7 @@ def analyze_signal(
         )
     else:
         btc_ok = True
-    if not btc_ok:
+    if not _btc_master_guard_allows_entry(btc_ok):
         return {"signal": "NO_TRADE", "reason": "BTC master guard blocked altcoin setup", "regime": regime}
 
     entry = float(last["close"])
@@ -1442,12 +1458,51 @@ def analyze_signal(
     if stop_pct <= 0 or stop_pct > MAX_STOP_DISTANCE_PCT:
         return {"signal": "NO_TRADE", "reason": "stop distance breaches 3.5% volatility cap", "regime": regime}
 
-    score_parts = {
-        "h1_close_vs_ema21": 35,
-        "h1_adx_gte_18": 35 if adx_meets_entry_threshold(regime["adx_1h"]) else 0,
-        "h4_alignment_bonus": 20 if regime.get("aligned_4h") else 0,
-        "btc_alignment": 10 if btc_ok else 0,
-    }
+    if _easy_demo_entry_enabled():
+        ema15_slope = float(e21.iloc[-1] - e21.iloc[-4])
+        ema15_aligned = (
+            float(last["close"]) > float(e21.iloc[-1]) and ema15_slope > 0
+            if direction == "LONG" else
+            float(last["close"]) < float(e21.iloc[-1]) and ema15_slope < 0
+        )
+        candle_momentum = (
+            float(last["close"]) > float(last["open"]) and float(last["close"]) >= float(previous["close"])
+            if direction == "LONG" else
+            float(last["close"]) < float(last["open"]) and float(last["close"]) <= float(previous["close"])
+        )
+        rsi_aligned = (
+            45.0 <= rsi_value <= 70.0 if direction == "LONG"
+            else 30.0 <= rsi_value <= 55.0
+        )
+        if not (ema15_aligned and candle_momentum and rsi_aligned):
+            return {
+                "signal": "NO_TRADE",
+                "reason": "Easy Demo requires aligned 15m EMA21 slope, RSI range and closed-candle momentum",
+                "regime": regime,
+                "demo_entry_context": {
+                    "ema15_aligned": bool(ema15_aligned),
+                    "candle_momentum": bool(candle_momentum),
+                    "rsi_aligned": bool(rsi_aligned),
+                    "rsi_15m": rsi_value,
+                    "btc_master_aligned": bool(btc_ok),
+                    "h4_opposed": bool(regime.get("opposed_4h")),
+                },
+            }
+        score_parts = {
+            "h1_close_vs_ema21": 35,
+            "m15_ema21_slope": 20,
+            "m15_candle_momentum": 25,
+            "m15_rsi_alignment": 15,
+            "h4_context_bonus": 3 if regime.get("aligned_4h") else 0,
+            "btc_context_bonus": 2 if btc_ok else 0,
+        }
+    else:
+        score_parts = {
+            "h1_close_vs_ema21": 35,
+            "h1_adx_gte_18": 35 if adx_meets_entry_threshold(regime["adx_1h"]) else 0,
+            "h4_alignment_bonus": 20 if regime.get("aligned_4h") else 0,
+            "btc_alignment": 10 if btc_ok else 0,
+        }
     confidence_score = sum(score_parts.values())
     if not entry_score_meets_threshold(confidence_score):
         return {"signal": "NO_TRADE", "reason": "confluence score below 62", "regime": regime,
@@ -1492,6 +1547,8 @@ def analyze_signal(
         "funding_max_age_ms": funding_max_age_ms,
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
+        "easy_demo_entry_mode": _easy_demo_entry_enabled(),
+        "elliott_is_advisory": _easy_demo_entry_enabled(),
     }
     return {
         "signal": direction, "signal_id": signal_id, "instrument_id": symbol,

@@ -1702,3 +1702,30 @@ class V2WaveNormalizationRegressionTests(unittest.TestCase):
         self.assertIn('"expected_side":"SHORT"', prompt)
 
 
+
+    def test_easy_demo_allows_uncertain_elliott_when_groq_risk_review_approves(self):
+        from crypto_super_radar.ai_second_opinion import _validated_v2_review
+        doc = self._document()
+        doc["wave_analyst"] = {
+            "verdict": "UNCERTAIN", "phase": "UNKNOWN",
+            "direction": "UNKNOWN", "reason_fa": "ساختار موج قطعی نیست و صرفاً زمینه‌ای است.",
+        }
+        result = _validated_v2_review(
+            doc, "openai/gpt-oss-20b", "perp:BTCUSDT", expected_side="SHORT",
+            evidence={
+                "easy_demo_entry_mode": True,
+                "elliott_wave": {"phase": "NO_RULE_VALID_IMPULSE", "pattern": "AMBIGUOUS"},
+            },
+        )
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["elliott_is_advisory"])
+
+    def test_easy_demo_prompt_marks_elliott_and_4h_as_advisory(self):
+        from crypto_super_radar.ai_second_opinion import _v2_prompt_messages
+        evidence = {
+            "easy_demo_entry_mode": True, "expected_side": "LONG",
+            "elliott_wave": {"phase": "NO_RULE_VALID_IMPULSE", "pattern": "AMBIGUOUS"},
+        }
+        prompt = _v2_prompt_messages(evidence)[0]["content"].lower()
+        self.assertIn("advisory", prompt)
+        self.assertIn("stop-loss", prompt)

@@ -276,6 +276,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
         analyzer=analyze_challenge1_v2_market
     env=os.environ if environ is None else environ
     trading_active=_enabled(env.get("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED")) and _enabled(env.get("BLOFIN_DEMO_TRADING_ENABLED"))
+    easy_demo_entry_mode = trading_active and _enabled(env.get("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE"))
     if trading_active and executor is None:
         raise RuntimeError("Demo trading flags enabled without BloFinDemoExecutor.")
     cycle_id,started_at=uuid.uuid4().hex,_utc_now()
@@ -367,6 +368,9 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
         "mode":"DEMO_AUTOPILOT" if trading_active else "DRY_RUN","environment":"BLOFIN_DEMO",
         "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted,
         "open_position_limit":4,"position_limit_enforced":trading_active,
+        "entry_mode":"EASY_DEMO" if easy_demo_entry_mode else "STANDARD",
+        "risk_policy":{"risk_per_trade_pct":0.005,"max_aggregate_risk_pct":0.005,
+            "daily_loss_limit_pct":0.01,"max_margin_usage_pct":0.10,"leverage":1},
         "tpsl_verified":trading_active,"exit_manager":exit_summary,
         "ai_reviews_performed":any(bool(row.get("ai_reviews")) for row in rows),
         "ai_model_policy":{"provider":"Groq","primary_model":GROQ_DEFAULT_MODEL,

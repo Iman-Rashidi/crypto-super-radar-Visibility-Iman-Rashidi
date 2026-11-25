@@ -11,7 +11,11 @@ on:
       - crypto_super_radar/ai_second_opinion.py
       - crypto_super_radar/ai_supervisor.py
       - crypto_super_radar/blofin_demo_executor.py
+      - crypto_super_radar/challenge1_v2.py
       - crypto_super_radar/challenge1_v2_autopilot.py
+      - crypto_super_radar/challenge1_v2_orchestration.py
+      - crypto_super_radar/ai_supervisor.py
+      - crypto_super_radar/ai_second_opinion.py
       - crypto_super_radar/telegram_notifier.py
       - tests/test_ai_second_opinion.py
       - tests/test_ai_supervisor.py
@@ -44,6 +48,8 @@ jobs:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       BLOFIN_DEMO_TRADING_ENABLED: ${{ vars.BLOFIN_DEMO_TRADING_ENABLED || 'true' }}
+      # Context-only entry relaxations are scoped to this Demo worker; risk, Groq, SL/TP and exits remain hard gates.
+      CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE: 'true'
       # Legacy V1 and smoke-test paths remain disabled.
       BLOFIN_DEMO_AUTOPILOT_ENABLED: 'false'
       BLOFIN_DEMO_SMOKE_TEST_ENABLED: 'false'
