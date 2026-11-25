@@ -457,7 +457,20 @@ def analyze_challenge1_v2_market(
     else:
         ready, reason = challenge1_v2_execution_evidence_ready(record)
     if not ready:
-        raise Challenge1V2DataBlocked("V2 execution evidence failed closed: " + reason)
+        error = Challenge1V2DataBlocked("V2 execution evidence failed closed: " + reason)
+        if "Elliott" in reason:
+            error.elliott_rejection_reason = reason
+            evidence = record.get("challenge1_v2_evidence")
+            wave = evidence.get("elliott_wave") if isinstance(evidence, Mapping) else None
+            if isinstance(wave, Mapping):
+                error.elliott_evidence_snapshot = {
+                    key: wave.get(key) for key in (
+                        "status", "phase", "pattern", "wave_alignment", "timeframe",
+                        "evidence_source", "data_asof_utc", "latest_closed_candle_open_utc",
+                        "confirmed_pivot_count", "invalidation_price",
+                    ) if key in wave
+                }
+        raise error
     record["status"] = "ANALYSIS_READY"
     record["orders_submitted"] = False
     asset = AssetSpec.parse("perp:" + symbol.replace("-", ""))

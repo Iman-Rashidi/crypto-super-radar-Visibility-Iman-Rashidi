@@ -69,7 +69,8 @@ def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "take_profit", "regime", "market_data_proof", "contract_specs", "market_quote",
         "signal_id", "ai_review", "second_ai_review", "ai_reviews", "ai_consensus",
         "ai_status", "ai_review_reason", "orders_submitted", "execution_result",
-        "entry_skipped_reason", "mode", "exit_manager_summary")
+        "entry_skipped_reason", "mode", "exit_manager_summary",
+        "elliott_rejection_reason", "elliott_evidence_snapshot")
     return {key: record.get(key) for key in allowed if key in record}
 
 
@@ -343,6 +344,12 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             safe={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE","status":"DATA_BLOCKED",
                 "reason":f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
                 "orders_submitted":False,"mode":"DRY_RUN"}
+            rejection = getattr(exc, "elliott_rejection_reason", None)
+            snapshot = getattr(exc, "elliott_evidence_snapshot", None)
+            if rejection:
+                safe["elliott_rejection_reason"] = str(rejection)[:2000]
+            if isinstance(snapshot, Mapping):
+                safe["elliott_evidence_snapshot"] = dict(snapshot)
         finished_at=_utc_now()
         persist_result(connection,cycle_id=cycle_id,symbol=symbol,result=safe,
             started_at=started_at,finished_at=finished_at)

@@ -1161,30 +1161,60 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         "WAVE_4_CONFIRMED",
         "FIVE_WAVE_IMPULSE_CONFIRMED",
     }
-    wave_status = str(wave.get("status") or "").upper()
-    phase = str(wave.get("phase") or "").upper()
-    wave_pattern = str(wave.get("pattern") or "").upper()
-    wave_alignment = str(wave.get("wave_alignment") or "").upper()
+    wave_status = str(wave.get("status") or "").strip().upper()
+    phase = str(wave.get("phase") or "").strip().upper()
+    wave_pattern = str(wave.get("pattern") or "").strip().upper()
+    wave_alignment = str(wave.get("wave_alignment") or "").strip().upper()
+    # The Elliott engine deliberately emits NO_RULE_VALID_IMPULSE when the
+    # confirmed pivots do not form a rule-valid impulse. This is an
+    # unconfirmed/ambiguous state, not a confirmed directional phase. Keep it
+    # eligible for the existing reviewer path, which still cannot approve it.
     wave_unconfirmed = (
         wave_status in {"AMBIGUOUS", "UNKNOWN", "INSUFFICIENT_DATA"}
-        or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN"}
+        or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN", "NO_RULE_VALID_IMPULSE"}
         or wave_pattern in {"AMBIGUOUS", "UNKNOWN", "NONE"}
         or wave_alignment in {"UNCONFIRMED", "AMBIGUOUS"}
     )
-    if (
-        wave.get("timeframe") != "1H"
-        or wave.get("evidence_source") != "CONFIRMED_CLOSED_1H_CANDLES"
-        or _utc_timestamp(wave.get("data_asof_utc")) != asof
-        or _utc_timestamp(wave.get("latest_closed_candle_open_utc")) != h1_open
-        or wave_alignment == "OPPOSED"
-        or (not wave_unconfirmed and (
-            wave_status not in {"CANDIDATE", "CONFIRMED"}
-            or wave_pattern != expected_pattern
-            or phase not in allowed_phases
-            or wave_alignment != "ALIGNED"
-        ))
-    ):
-        return False, "V2 Elliott evidence is directly opposed or violates its as-of contract."
+    wave_asof = _utc_timestamp(wave.get("data_asof_utc"))
+    wave_candle_open = _utc_timestamp(wave.get("latest_closed_candle_open_utc"))
+    wave_checks = []
+    if str(wave.get("timeframe") or "") != "1H":
+        wave_checks.append("timeframe_must_be_1H")
+    if str(wave.get("evidence_source") or "") != "CONFIRMED_CLOSED_1H_CANDLES":
+        wave_checks.append("evidence_source_must_be_confirmed_closed_1H")
+    if wave_asof != asof:
+        wave_checks.append("data_asof_utc_mismatch")
+    if wave_candle_open != h1_open:
+        wave_checks.append("latest_closed_candle_open_utc_mismatch")
+    if wave_alignment == "OPPOSED":
+        wave_checks.append("wave_alignment_opposed")
+    if not wave_unconfirmed:
+        if wave_status not in {"CANDIDATE", "CONFIRMED"}:
+            wave_checks.append("confirmed_wave_status_invalid")
+        if wave_pattern != expected_pattern:
+            wave_checks.append("wave_pattern_does_not_match_signal")
+        if phase not in allowed_phases:
+            wave_checks.append("confirmed_wave_phase_invalid")
+        if wave_alignment != "ALIGNED":
+            wave_checks.append("confirmed_wave_alignment_not_aligned")
+    if wave_checks:
+        details = {
+            "checks": wave_checks,
+            "signal": side,
+            "expected_pattern": expected_pattern,
+            "status": wave_status,
+            "phase": phase,
+            "pattern": wave_pattern,
+            "wave_alignment": wave_alignment,
+            "timeframe": wave.get("timeframe"),
+            "evidence_source": wave.get("evidence_source"),
+            "data_asof_utc": wave.get("data_asof_utc"),
+            "expected_data_asof_utc": asof.isoformat(),
+            "latest_closed_candle_open_utc": wave.get("latest_closed_candle_open_utc"),
+            "expected_latest_closed_candle_open_utc": h1_open.isoformat(),
+            "confirmed_pivot_count": wave.get("confirmed_pivot_count"),
+        }
+        return False, "V2 Elliott evidence rejected: " + repr(details)
     if not wave_unconfirmed:
         try:
             pivot_count = int(wave.get("confirmed_pivot_count"))

@@ -330,8 +330,15 @@ def run_challenge1_v2_supervisor_reviews(
     evidence = evidence if isinstance(evidence, dict) else {}
     wave = evidence.get("elliott_wave")
     wave = wave if isinstance(wave, dict) else {}
-    expected_wave_phase = str(wave.get("phase") or "").upper()
-    expected_wave_direction = str(wave.get("pattern") or "").upper()
+    expected_wave_phase = _ai._normalize_v2_phase(wave.get("phase"))
+    expected_wave_direction = _ai._normalize_v2_direction(wave.get("pattern"))
+    elliott_evidence_snapshot = {
+        key: wave.get(key) for key in (
+            "status", "phase", "pattern", "wave_alignment", "timeframe",
+            "evidence_source", "data_asof_utc", "latest_closed_candle_open_utc",
+            "confirmed_pivot_count", "invalidation_price",
+        ) if key in wave
+    }
 
     if expected_side not in {"LONG", "SHORT"}:
         reviewed_at_utc = datetime.now(timezone.utc).isoformat()
@@ -360,6 +367,7 @@ def run_challenge1_v2_supervisor_reviews(
             "ai_review": groq, "second_ai_review": None,
             "ai_reviews": [{"reviewer_id": "groq", "actor": "Groq Supervisor", "review": groq}],
             "ai_consensus": consensus,
+            "elliott_evidence_snapshot": elliott_evidence_snapshot,
             "reason_fa": "سیگنال جهت‌دار وجود ندارد؛ برای NO_TRADE هیچ درخواست AI ارسال نشد.",
         }
 
@@ -518,6 +526,7 @@ def run_challenge1_v2_supervisor_reviews(
         "second_ai_review": None,
         "ai_reviews": reviews,
         "ai_consensus": consensus,
+        "elliott_evidence_snapshot": elliott_evidence_snapshot,
         "reason_fa": status_fa,
     }
 
