@@ -650,7 +650,7 @@ class WebAppHttpTests(unittest.TestCase):
                 {
                     "reviewer_id": "groq",
                     "provider": "Groq",
-                    "model": "openai/gpt-oss-120b",
+                    "model": "openai/gpt-oss-20b",
                     "review": {
                         "status": "REJECTED",
                         "decision": "VETO",
@@ -659,7 +659,7 @@ class WebAppHttpTests(unittest.TestCase):
                         "response_validated": True,
                         "request_attempted": True,
                         "http_status": 200,
-                        "returned_model": "openai/gpt-oss-120b",
+                        "returned_model": "openai/gpt-oss-20b",
                     },
                 },
             ],
@@ -833,12 +833,12 @@ class WebAppHttpTests(unittest.TestCase):
         previous = dict(web_app.AI_DRY_RUN_STATE)
         second_config = {
             "configured": True, "provider": "Groq",
-            "model": "openai/gpt-oss-120b", "status": "CONFIGURED",
+            "model": "openai/gpt-oss-20b", "status": "CONFIGURED",
             "configuration_issues": [],
         }
         groq_review = {
             "reviewer_id": "groq", "provider": "Groq",
-            "model": "openai/gpt-oss-120b",
+            "model": "openai/gpt-oss-20b",
             "request_attempted": True, "response_source": "LIVE_API",
         }
         expected_quorum = {
@@ -898,7 +898,7 @@ class WebAppHttpTests(unittest.TestCase):
     def test_challenge1_synthetic_dry_run_fails_closed_when_groq_reviewer_is_missing(self):
         previous = dict(web_app.AI_DRY_RUN_STATE)
         second_config = {
-            "configured": False, "provider": "Groq", "model": "openai/gpt-oss-120b",
+            "configured": False, "provider": "Groq", "model": "openai/gpt-oss-20b",
             "status": "NOT_CONFIGURED", "configuration_issues": ["GROQ_API_KEY_MISSING"],
         }
         try:
@@ -2092,7 +2092,7 @@ class Challenge1PositionManagerTests(unittest.TestCase):
 
 class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
     def review(
-        self, reviewer_id="groq", provider="Groq", model="openai/gpt-oss-120b", *,
+        self, reviewer_id="groq", provider="Groq", model="openai/gpt-oss-20b", *,
         status="APPROVED", wave_phase="WAVES_1_AND_2_CONFIRMED",
         wave_direction="BULLISH", trader_proposal="LONG", paper_entry=True,
     ):
@@ -2162,7 +2162,7 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
     def test_missing_or_unverified_groq_review_fails_closed(self):
         groq = {
             "reviewer_id": "groq", "provider": "Groq",
-            "model": "openai/gpt-oss-120b", "status": "NOT_CONFIGURED",
+            "model": "openai/gpt-oss-20b", "status": "NOT_CONFIGURED",
             "request_attempted": False, "response_source": "NONE",
             "response_validated": False, "model_verified": False,
             "paper_entry_eligible": False,
