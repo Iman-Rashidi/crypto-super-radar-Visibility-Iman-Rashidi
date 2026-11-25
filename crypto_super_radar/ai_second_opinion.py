@@ -27,49 +27,47 @@ from .agent_council import build_native_agent_council_review
 _GROQ_REQUEST_LOCK = threading.Lock()
 _GROQ_LAST_REQUEST_STARTED = 0.0
 _GROQ_MIN_INTERVAL_SECONDS = 2.5
-_GROQ_429_RETRY_DELAY_SECONDS = 3.0
 
 
 GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
 GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
-GROQ_ALLOWED_MODELS = frozenset({GROQ_DEFAULT_MODEL, GROQ_FALLBACK_MODEL})
+GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
 
 
 def _post_groq_with_rate_limit(
     post, endpoint, *, headers, payload, timeout, allow_redirects,
 ):
-    """Pace Groq requests; retry primary once, then fail over to the approved model."""
+    """Use the approved primary once, then fail over immediately on 429/timeout."""
     global _GROQ_LAST_REQUEST_STARTED
     with _GROQ_REQUEST_LOCK:
-        for attempt in range(2):
+        primary_model = str(payload.get("model") or GROQ_DEFAULT_MODEL).strip()
+
+        def paced_post(model):
+            global _GROQ_LAST_REQUEST_STARTED
             elapsed = time.monotonic() - _GROQ_LAST_REQUEST_STARTED
             wait = max(0.0, _GROQ_MIN_INTERVAL_SECONDS - elapsed)
             if wait:
                 time.sleep(wait)
             _GROQ_LAST_REQUEST_STARTED = time.monotonic()
-            response = post(
+            payload["model"] = model
+            return post(
                 endpoint, headers=headers, json=payload,
                 timeout=timeout, allow_redirects=allow_redirects,
             )
-            status = int(getattr(response, "status_code", 0) or 0)
-            if status != 429:
-                return response
-            if attempt == 0:
-                time.sleep(_GROQ_429_RETRY_DELAY_SECONDS)
 
-        primary_model = str(payload.get("model") or "").strip()
-        if primary_model != GROQ_DEFAULT_MODEL:
-            return response
-        payload["model"] = GROQ_FALLBACK_MODEL
-        elapsed = time.monotonic() - _GROQ_LAST_REQUEST_STARTED
-        wait = max(0.0, _GROQ_MIN_INTERVAL_SECONDS - elapsed)
-        if wait:
-            time.sleep(wait)
-        _GROQ_LAST_REQUEST_STARTED = time.monotonic()
-        return post(
-            endpoint, headers=headers, json=payload,
-            timeout=timeout, allow_redirects=allow_redirects,
-        )
+        try:
+            response = paced_post(primary_model)
+        except (requests.Timeout, requests.ConnectionError):
+            if primary_model != GROQ_DEFAULT_MODEL:
+                raise
+            response = None
+        else:
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status != 429 or primary_model != GROQ_DEFAULT_MODEL:
+                return response
+
+        # Never retry the primary in the same cycle; use one approved fallback attempt.
+        return paced_post(GROQ_FALLBACK_MODEL)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
@@ -2124,12 +2122,17 @@ def second_ai_connection_status() -> dict[str, Any]:
     # Groq defaults; explicit CSR_SECOND_AI_* settings still take precedence.
     groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
     key = (os.getenv("CSR_SECOND_AI_API_KEY") or groq_key).strip()
-    model = (os.getenv("CSR_SECOND_AI_MODEL") or (
-        GROQ_DEFAULT_MODEL if groq_key else ""
-    )).strip()
     provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or (
         "Groq" if groq_key else ""
     )).strip()
+    provider_key = provider.casefold().replace("-", "").replace("_", "").replace(" ", "")
+    # Groq V2 always starts with the approved 20B primary; legacy env overrides
+    # cannot silently route requests to an unapproved 120B model.
+    model = (
+        GROQ_DEFAULT_MODEL
+        if provider_key in {"groq", "groqcloud"}
+        else (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()
+    )
     endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or (
         "https://api.groq.com/openai/v1/chat/completions" if groq_key else ""
     )).strip()
@@ -2316,7 +2319,7 @@ def run_independent_ai_supervisor(
         request_model = str(payload.get("model") or model).strip()
         if http_status != 200:
             return {
-                "reviewer_id": "second_ai", "provider": provider, "model": model,
+                "reviewer_id": "second_ai", "provider": provider, "model": request_model,
                 "status": "ERROR" if http_status != 429 else "UNKNOWN",
                 "status_fa": "ناظر مستقل دوم پاسخ موفق و قابل بررسی برنگرداند.",
                 "reason": "Independent second reviewer endpoint returned a non-200 status.",
@@ -2418,7 +2421,7 @@ def run_independent_ai_supervisor(
         if isinstance(extra_diagnostic, dict):
             parser_diagnostic.update(extra_diagnostic)
         return {
-            "reviewer_id": "second_ai", "provider": provider, "model": model,
+            "reviewer_id": "second_ai", "provider": provider, "model": str(payload.get("model") or model),
             "status": "ERROR",
             "status_fa": "پاسخ ناظر مستقل دوم قابل اعتبارسنجی نبود؛ ورود جدید متوقف می‌ماند.",
             "reason": "Independent second reviewer request or validation failed.",
@@ -2845,9 +2848,7 @@ def run_challenge1_observer_reviews(
     if provider_key == "openrouter" or second_host in {"openrouter.ai", "www.openrouter.ai"}:
         second_issues.append("SECOND_AI_PROVIDER_MUST_DIFFER")
     if provider_key in {"groq", "groqcloud"}:
-        free_models = {
-            "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-        }
+        free_models = GROQ_ALLOWED_MODELS
         if second_model and second_model not in free_models:
             second_issues.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
         if second_endpoint and (
