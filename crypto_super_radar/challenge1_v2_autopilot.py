@@ -251,16 +251,42 @@ def _persist_entry_state(client: Any, store: Any, execution: Mapping[str, Any],
     inst=str(execution.get("instrument_id") or signal.get("instrument_id") or "").upper()
     if not pid or not cid or not inst:
         raise RuntimeError("Entry fill lacks exact position/order identity.")
-    tpsl=_rows(client.get_open_tpsl_orders(inst_id=inst,client_order_id=cid,limit=100))
-    active=[r for r in tpsl if str(r.get("positionId") or "")==pid
-        and str(r.get("state") or "").lower()=="live" and r.get("slTriggerPrice") not in (None,"")]
-    if len(active)!=1:
-        raise RuntimeError("Exact active protective SL could not be linked to the entry.")
+    tpsl=_rows(client.get_open_tpsl_orders(inst_id=inst,limit=100))
+    side=str(execution.get("side") or signal.get("signal") or "").upper()
+    close_side="sell" if side=="LONG" else "buy"
     qty=str(execution.get("filled_size") or execution.get("quantity_contracts") or "")
+    stop=str(execution.get("stop_loss") or "")
+    active=[]
+    for row in tpsl:
+        if str(row.get("instId") or "").upper()!=inst:
+            continue
+        if str(row.get("positionSide") or "").lower()!="net":
+            continue
+        if str(row.get("marginMode") or "").lower()!="isolated":
+            continue
+        if str(row.get("side") or "").lower()!=close_side:
+            continue
+        if str(row.get("state") or "").lower()!="live":
+            continue
+        if str(row.get("slTriggerPriceType") or "").lower()!="mark":
+            continue
+        if row.get("slTriggerPrice") in (None,""):
+            continue
+        try:
+            if Decimal(str(row.get("slTriggerPrice"))) != Decimal(stop):
+                continue
+            sizes=[v for v in (row.get("size"),row.get("actualSize")) if v not in (None,"")]
+            if not sizes or any(Decimal(str(v)) != Decimal(qty) for v in sizes):
+                continue
+        except Exception:
+            continue
+        active.append(row)
+    if len(active)!=1:
+        raise RuntimeError("Exact full-size active protective SL could not be linked by supported exchange fields.")
     state={"position_id":pid,"client_order_id":cid,"instrument_id":inst,
-        "side":str(execution.get("side") or signal.get("signal") or "").upper(),
+        "side":side,
         "entry_price":str(execution.get("entry_price") or execution.get("entry_reference_price") or ""),
-        "initial_stop_loss":str(execution.get("stop_loss") or ""),
+        "initial_stop_loss":stop,
         "original_size":qty,"remaining_size":qty,"tp1_executed":False,"candles_elapsed":0,
         "entry_time_ms":now_ms,"sl_tpsl_id":str(active[0].get("tpslId") or ""),
         "net_break_even_price":execution.get("net_break_even_price"),"status":"OPEN"}

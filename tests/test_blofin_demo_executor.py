@@ -728,7 +728,8 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self._configure_net_position()
         active = [{
             "tpslId": "tpsl-1", "instId": "BTC-USDT", "positionSide": "net",
-            "positionId": "position-1", "state": "live", "slTriggerPrice": "98", "size": "2", "actualSize": "2",
+            "marginMode": "isolated", "side": "sell",
+            "state": "live", "slTriggerPrice": "98", "size": "2", "actualSize": "2",
         }]
         amended = [{**active[0], "slTriggerPrice": "100.2"}]
         self.client.get_open_tpsl_orders = Mock(side_effect=[active, amended])
@@ -742,6 +743,8 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self.assertEqual(body["newSlTriggerPrice"], "100.2")
         self.assertEqual(body["tpslId"], "tpsl-1")
         self.assertNotIn("cancel", path)
+        self.assertEqual(self.client.get_open_tpsl_orders.call_args_list[0].kwargs["tpsl_id"], "tpsl-1")
+        self.assertEqual(self.client.get_open_tpsl_orders.call_args_list[1].kwargs["tpsl_id"], "tpsl-1")
 
     def test_amend_sl_blocks_if_existing_protective_order_is_not_verified(self):
         self._configure_net_position()
@@ -1788,7 +1791,7 @@ class FakeExecutorClient:
             return []
         return [{
             "tpslId": "simulated-tpsl-123", "clientOrderId": client_order_id,
-            "positionId": self.position_id, "instId": inst_id,
+            "instId": inst_id,
             "marginMode": "isolated", "positionSide": self.order_args["position_side"],
             "side": "sell" if self.order_args["side"] == "buy" else "buy",
             "size": str(filled), "actualSize": str(filled), "state": "live",

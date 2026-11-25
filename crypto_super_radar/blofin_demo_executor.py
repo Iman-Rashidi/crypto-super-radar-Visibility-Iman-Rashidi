@@ -1011,7 +1011,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if stop <= 0:
             raise ValueError("new_stop_loss must be positive.")
         position = self._net_position_for_exit(inst_id=inst_id, position_id=position_id)
-        active = self.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+        active = self.get_open_tpsl_orders(inst_id=inst_id, tpsl_id=tpsl_id, limit=100)
         if not isinstance(active, list):
             raise BloFinDemoResponseError("Active TP/SL response is not a list.")
         expected_size = abs(position["_signed_size_decimal"])
@@ -1024,9 +1024,9 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
                 or str(row.get("instId") or "").upper() != inst_id
                 or str(row.get("positionSide") or "").lower() != "net"
                 or str(row.get("state") or "").lower() != "live"
-                or (
-                    position_id
-                    and str(row.get("positionId") or "").strip() != position_id
+                or str(row.get("marginMode") or "").lower() != "isolated"
+                or str(row.get("side") or "").lower() != (
+                    "sell" if position["_signed_size_decimal"] > 0 else "buy"
                 )
             ):
                 continue
@@ -1052,7 +1052,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             "requestId": request_id,
             "newSlTriggerPrice": _format_decimal(stop),
         })
-        verified = self.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+        verified = self.get_open_tpsl_orders(inst_id=inst_id, tpsl_id=tpsl_id, limit=100)
         if not isinstance(verified, list):
             raise BloFinDemoExecutionUnknown(
                 "SL amendment was submitted but active protection could not be re-read."
@@ -1064,7 +1064,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             and str(row.get("instId") or "").upper() == inst_id
             and str(row.get("positionSide") or "").lower() == "net"
             and str(row.get("state") or "").lower() == "live"
-            and str(row.get("positionId") or "").strip() == str(position.get("positionId") or "").strip()
+            and str(row.get("marginMode") or "").lower() == "isolated"
+            and str(row.get("side") or "").lower() == (
+                "sell" if position["_signed_size_decimal"] > 0 else "buy"
+            )
             and _decimal(row.get("slTriggerPrice"), "verified_stop_loss") == stop
             and any(
                 value not in (None, "")
@@ -2726,7 +2729,7 @@ class BloFinDemoExecutor:
         close_side = "sell" if side == "LONG" else "buy"
         try:
             tpsl_rows = self._response_rows(self.client.get_open_tpsl_orders(
-                inst_id=inst_id, client_order_id=client_order_id, limit=100,
+                inst_id=inst_id, limit=100,
             ))
         except Exception as exc:
             return {"verified": False, "reason": "TPSL_READ_FAILED",
@@ -2737,18 +2740,15 @@ class BloFinDemoExecutor:
         for row in tpsl_rows:
             if str(row.get("instId") or "").upper() != inst_id:
                 continue
-            if str(row.get("positionId") or "").strip() != position_id:
-                continue
             if str(row.get("positionSide") or "").lower() != expected_position_side:
+                continue
+            if str(row.get("marginMode") or "").lower() != "isolated":
                 continue
             if str(row.get("side") or "").lower() != close_side:
                 continue
             if str(row.get("state") or "").lower() != "live":
                 continue
-            returned_client_id = str(row.get("clientOrderId") or "").strip()
-            if returned_client_id and returned_client_id != client_order_id:
-                continue
-            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+remove client order id requirement            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
             if not raw_sizes or any(not self._same_decimal(v, filled_size, "tpsl_size") for v in raw_sizes):
                 continue
             row_tp, row_sl = row.get("tpTriggerPrice"), row.get("slTriggerPrice")

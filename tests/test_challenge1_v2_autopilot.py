@@ -461,3 +461,39 @@ class Challenge1V2EasyDemoIndicatorConfirmationTests(unittest.TestCase):
         )
         self.assertFalse(flat["confirmed"])
         self.assertFalse(overbought["confirmed"])
+
+
+class Challenge1V2EntryStateLinkageTests(unittest.TestCase):
+    def test_persist_entry_state_links_active_sl_without_position_id(self):
+        from crypto_super_radar.challenge1_v2_autopilot import _persist_entry_state
+        store = FakeStore({})
+        class Exchange:
+            def get_open_tpsl_orders(self, *, inst_id, limit):
+                return [{
+                    "tpslId": "tpsl-verified-1",
+                    "instId": inst_id,
+                    "marginMode": "isolated",
+                    "positionSide": "net",
+                    "side": "sell",
+                    "state": "live",
+                    "size": "2",
+                    "actualSize": None,
+                    "slTriggerPrice": "98",
+                    "slTriggerPriceType": "mark",
+                }]
+        execution = {
+            "position_id": "pos-1",
+            "client_order_id": "entry-1",
+            "instrument_id": "BTC-USDT",
+            "side": "LONG",
+            "entry_price": "100",
+            "stop_loss": "98",
+            "filled_size": "2",
+            "net_break_even_price": "100.15",
+        }
+        saved = _persist_entry_state(
+            Exchange(), store, execution, {"instrument_id": "BTC-USDT"}, now_ms=1800000000000
+        )
+        self.assertEqual(saved["position_id"], "pos-1")
+        self.assertEqual(saved["sl_tpsl_id"], "tpsl-verified-1")
+        self.assertEqual(saved["remaining_size"], "2")

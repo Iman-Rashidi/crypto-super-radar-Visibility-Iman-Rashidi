@@ -365,16 +365,22 @@ class BloFinDemoReadOnly:
 
     def get_open_tpsl_orders(
         self, *, inst_id: str | None = None,
-        client_order_id: str | None = None, limit: int = 100,
+        client_order_id: str | None = None, tpsl_id: str | None = None,
+        limit: int = 100,
     ) -> Any:
-        """Read active exchange-managed TP/SL orders, optionally by client order id."""
+        """Read active exchange-managed TP/SL orders by instrument, client id or TPSL id."""
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100.")
         if client_order_id is not None and not str(client_order_id).strip():
             raise ValueError("client_order_id must be non-empty when provided.")
+        if tpsl_id is not None and not str(tpsl_id).strip():
+            raise ValueError("tpsl_id must be non-empty when provided.")
         return self._get(
             "/api/v1/trade/orders-tpsl-pending",
-            params={"instId": inst_id, "clientOrderId": client_order_id, "limit": str(limit)},
+            params={
+                "instId": inst_id, "clientOrderId": client_order_id,
+                "tpslId": tpsl_id, "limit": str(limit),
+            },
             private=True,
         )
 
