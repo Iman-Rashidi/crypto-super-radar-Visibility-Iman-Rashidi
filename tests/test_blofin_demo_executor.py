@@ -1811,7 +1811,8 @@ class BloFinDemoV2ExecutorTests(unittest.TestCase):
         try:
             result = executor._verify_filled_position_and_protection(
                 order={"instrument_id": "BTC-USDT", "side": "LONG",
-                       "position_side": "net", "take_profit": "", "stop_loss": "98"},
+                       "position_side": "net", "take_profit": "104",
+                       "exchange_tp_required": 0, "stop_loss": "98"},
                 detail={"positionId": client.position_id},
                 filled_size=Decimal("2"),
                 client_order_id="0123456789abcdef0123456789abcdef",
