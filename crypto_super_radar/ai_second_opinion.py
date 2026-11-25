@@ -1388,7 +1388,7 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 "model_verified": False, "latency_ms": latency_ms,
                 "paper_entry_eligible": False,
             }
-        if returned_model.strip().split(":", 1)[0] != request_model.split(":", 1)[0]:
+        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
             return {
                 "provider": "OpenRouter", "model": model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
