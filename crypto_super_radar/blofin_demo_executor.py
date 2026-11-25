@@ -2697,6 +2697,21 @@ class BloFinDemoExecutor:
         if expected_size <= 0 or side not in {"LONG", "SHORT"}:
             raise BloFinDemoExecutionUnknown("Unprotected fill identity is incomplete; manual review required.")
         positions = self._response_rows(self.client.get_positions(inst_id=inst_id))
+        if not position_id:
+            open_rows = [
+                row for row in positions
+                if str(row.get("instId") or "").upper() == inst_id.upper()
+                and _decimal(row.get("positions") or "0", "position_size") != 0
+            ]
+            if open_rows:
+                self.store.update_order(
+                    client_order_id, "CRITICAL_UNPROTECTED",
+                    filled_size=_format_decimal(expected_size),
+                    critical_reason="Filled position ID could not be proven; refusing to close an ambiguous position.",
+                )
+                raise BloFinDemoExecutionUnknown(
+                    "Filled Demo position ID could not be proven; refusing an ambiguous close and blocking new entries."
+                )
         candidates = []
         for row in positions:
             if str(row.get("instId") or "").upper() != inst_id.upper():

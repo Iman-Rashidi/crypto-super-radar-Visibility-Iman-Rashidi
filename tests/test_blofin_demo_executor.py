@@ -1825,6 +1825,11 @@ class FakeExecutorClient:
         self.order_args = dict(kwargs)
         return self.order_response
 
+    def close_futures_position(self, **kwargs):
+        self.calls.append(("emergency_close", kwargs))
+        self.position_rows_override = []
+        return {"code": "0", "data": {"orderId": "simulated-emergency-close"}}
+
 
 class BloFinDemoV2ExecutorTests(unittest.TestCase):
     def test_v2_fill_verification_accepts_full_size_sl_without_exchange_tp(self):
@@ -2146,7 +2151,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_filled_order_without_exact_tp_sl_protection_is_critical_and_blocks_new_entries(self):
+    def test_filled_order_without_exact_tp_sl_is_emergency_closed_and_blocks_same_cycle(self):
         with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
@@ -2154,17 +2159,16 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         client.protection_rows_override = []
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
-            result = executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
-            self.assertEqual(result["status"], "CRITICAL_UNPROTECTED")
-            self.assertTrue(result["new_entries_blocked"])
-            self.assertEqual(store.get_order(result["client_order_id"])["status"], "CRITICAL_UNPROTECTED")
-            self.assertEqual(store.trade_budget_status()["unresolved_orders"], 1)
-            with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "unresolved outcome"):
-                executor.execute(signal_record(bar_offset_minutes=5), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "emergency close and flat verification succeeded"):
+                executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            client_order_id = client.order_args["client_order_id"]
+            self.assertIn("emergency_close", [call[0] for call in client.calls if isinstance(call, tuple)])
+            self.assertEqual(store.get_order(client_order_id)["status"], "CLOSED")
+            self.assertEqual(store.trade_budget_status()["unresolved_orders"], 0)
         finally:
             store.close()
 
-    def test_position_id_mismatch_is_not_accepted_as_protection(self):
+    def test_position_id_mismatch_blocks_ambiguous_emergency_close(self):
         with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
@@ -2175,10 +2179,12 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         }]
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
-            result = executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
-            self.assertEqual(result["status"], "CRITICAL_UNPROTECTED")
-            self.assertIsNone(result["position_id"])
-            self.assertEqual(result["protection"]["reason"], "EXACT_POSITION_ID_NOT_PROVEN")
+            with self.assertRaisesRegex(BloFinDemoExecutionUnknown, "position ID could not be proven"):
+                executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            self.assertNotIn("emergency_close", [call[0] for call in client.calls if isinstance(call, tuple)])
+            latest = store.latest_order()
+            self.assertEqual(latest["status"], "CRITICAL_UNPROTECTED")
+            self.assertIsNone(latest.get("position_id"))
         finally:
             store.close()
 
