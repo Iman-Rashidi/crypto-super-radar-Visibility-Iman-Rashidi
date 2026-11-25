@@ -231,7 +231,6 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         self.assertFalse(out["regime"]["aligned_4h"])
         self.assertEqual(out["challenge1_v2_evidence"]["elliott_wave"]["phase"], "AMBIGUOUS")
 
-
 class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
     def _record(self, wave):
         import pandas as pd
@@ -268,7 +267,20 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
             },
         }
 
-    def test_no_rule_valid_impulse_is_unconfirmed_not_a_malformed_contract(self):
+    def test_confirmed_directional_elliott_evidence_passes_the_contract(self):
+        from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
+        wave = {
+            "status": "CANDIDATE", "pattern": "BULLISH",
+            "phase": "WAVES_1_AND_2_CONFIRMED", "wave_alignment": "ALIGNED",
+            "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+            "data_asof_utc": "2026-11-25T18:00:00+00:00",
+            "latest_closed_candle_open_utc": "2026-11-25T17:00:00+00:00",
+            "confirmed_pivot_count": 6, "pivots": [],
+        }
+        ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
+        self.assertTrue(ready, reason)
+
+    def test_no_rule_valid_impulse_remains_fail_closed_with_field_diagnostics(self):
         from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
         wave = {
             "status": "AMBIGUOUS", "pattern": "AMBIGUOUS",
@@ -279,7 +291,9 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
             "confirmed_pivot_count": 2, "pivots": [],
         }
         ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
-        self.assertTrue(ready, reason)
+        self.assertFalse(ready)
+        self.assertIn("confirmed_wave_phase_invalid", reason)
+        self.assertIn("NO_RULE_VALID_IMPULSE", reason)
 
     def test_opposed_elliott_still_fails_closed_with_field_diagnostics(self):
         from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready

@@ -1171,7 +1171,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     # eligible for the existing reviewer path, which still cannot approve it.
     wave_unconfirmed = (
         wave_status in {"AMBIGUOUS", "UNKNOWN", "INSUFFICIENT_DATA"}
-        or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN", "NO_RULE_VALID_IMPULSE"}
+        or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN"}
         or wave_pattern in {"AMBIGUOUS", "UNKNOWN", "NONE"}
         or wave_alignment in {"UNCONFIRMED", "AMBIGUOUS"}
     )
