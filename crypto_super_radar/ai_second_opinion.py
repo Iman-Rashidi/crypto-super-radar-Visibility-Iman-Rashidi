@@ -138,7 +138,7 @@ def _post_openrouter_with_fallback(
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v13-v2-canonical-wave-echo"
+PROMPT_VERSION = "free-second-opinion-v14-v2-structured-wave-evidence"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
