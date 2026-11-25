@@ -204,6 +204,11 @@ class Challenge1V2SpecialistNormalizationTests(unittest.TestCase):
                 "verdict": "SUPPORT", "phase": "WAVE_4_CONFIRMED",
                 "direction": "BEARISH", "reason_fa": "موج با شواهد هم‌خوان است.",
             },
+            # Keep inherited generic approval echoes consistent with this SHORT fixture.
+            "expected_side": "SHORT",
+            "trader_proposal": "SHORT",
+            "elliott_wave_phase": "WAVE_4_CONFIRMED",
+            "elliott_wave_direction": "BEARISH",
         })
         return document
 
