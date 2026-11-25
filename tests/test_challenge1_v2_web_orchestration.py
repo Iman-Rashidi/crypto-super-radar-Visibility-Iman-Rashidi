@@ -502,6 +502,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         trade_client = FakeBloFinDemoTradeClient(now_ms=self.client.now_ms)
         with patch.dict(os.environ, {
             "BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true",
+            "CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true",
             "CHALLENGE_1_V2_SINGLE_SHOT_WRITE": "true",
             "SINGLE_SHOT_DEMO_TEST": "true",
             "BLOFIN_DEMO_TRADING_ENABLED": "true",
