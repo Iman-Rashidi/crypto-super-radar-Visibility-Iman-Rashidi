@@ -551,6 +551,8 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         order = store.latest_order()
         self.assertEqual(order["status"], "FILLED")
         self.assertEqual(order["position_id"], trade_client.position_id)
+        self.assertEqual(order["exchange_tp_required"], 0)
+        self.assertGreater(order["take_profit"], 0)  # Strategy TP1 remains journaled; it is not exchange-attached.
         # V2 execution must not consume the legacy lifetime one-shot lock.
         lock_status = store.single_shot_lock_status()
         self.assertFalse(lock_status["locked"])
