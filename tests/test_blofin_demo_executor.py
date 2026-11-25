@@ -1799,6 +1799,31 @@ class FakeExecutorClient:
 
 
 class BloFinDemoV2ExecutorTests(unittest.TestCase):
+    def test_v2_fill_verification_accepts_full_size_sl_without_exchange_tp(self):
+        store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.order_args = {
+            "inst_id": "BTC-USDT", "side": "buy", "position_side": "net",
+            "size": "2", "take_profit": None, "stop_loss": "98",
+        }
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=False)
+        try:
+            result = executor._verify_filled_position_and_protection(
+                order={"instrument_id": "BTC-USDT", "side": "LONG",
+                       "position_side": "net", "take_profit": "", "stop_loss": "98"},
+                detail={"positionId": client.position_id},
+                filled_size=Decimal("2"),
+                client_order_id="0123456789abcdef0123456789abcdef",
+            )
+            self.assertTrue(result["verified"])
+            self.assertTrue(result["sl_verified"])
+            self.assertFalse(result["tp_required"])
+            self.assertFalse(result["tp_verified"])
+        finally:
+            store.close()
+
+
     def test_v2_executor_blocks_missing_reviewer_before_any_exchange_call_or_reservation(self):
         store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
