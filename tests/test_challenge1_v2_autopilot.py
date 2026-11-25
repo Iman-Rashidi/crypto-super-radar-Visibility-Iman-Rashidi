@@ -233,33 +233,24 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
 
 
 class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
-    def test_no_rule_valid_impulse_is_unconfirmed_not_a_malformed_contract(self):
-        from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
+    def _record(self, wave):
         import pandas as pd
-
         asof = pd.Timestamp("2026-11-25T18:00:00Z")
         h1_open = asof - pd.Timedelta(hours=1)
         h4_open = asof - pd.Timedelta(hours=4)
         signal_open = asof - pd.Timedelta(minutes=15)
-        symbol = "BTC-USDT"
-        side = "LONG"
+        symbol, side = "BTC-USDT", "LONG"
         signal_id = f"challenge1-v2:{symbol}:15m:{signal_open.isoformat()}:{side}"
-        wave = {
-            "status": "AMBIGUOUS", "pattern": "AMBIGUOUS",
-            "phase": "NO_RULE_VALID_IMPULSE", "wave_alignment": "UNCONFIRMED",
-            "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
-            "data_asof_utc": asof.isoformat(),
-            "latest_closed_candle_open_utc": h1_open.isoformat(),
-            "confirmed_pivot_count": 2, "pivots": [],
-        }
-        record = {
+        funding_time = int((asof - pd.Timedelta(minutes=1)).timestamp() * 1000)
+        funding_max_age = 9 * 60 * 60_000
+        return {
             "signal": side, "instrument_id": symbol, "orders_submitted": False,
             "signal_id": signal_id, "signal_candle_open_utc": signal_open.isoformat(),
             "entry": 100.0, "stop_loss": 98.0, "take_profit": 104.0,
-            "confidence_score": 70.0, "gross_rr": 2.0, "funding_rate": 0.0,
-            "spread_fraction": 0.0001, "funding_kind": "0",
-            "funding_event_time_ms": int((asof - pd.Timedelta(minutes=1)).timestamp() * 1000),
-            "funding_max_age_ms": 9 * 60 * 60_000,
+            "confidence_score": 70.0, "score_parts": {"trend": 70.0},
+            "gross_rr": 2.0, "funding_rate": 0.0, "spread_fraction": 0.0001,
+            "funding_kind": "0", "funding_event_time_ms": funding_time,
+            "funding_max_age_ms": funding_max_age,
             "regime": {"direction": side, "status": "TREND",
                        "candle_open_utc": h1_open.isoformat(),
                        "candle_open_utc_4h": h4_open.isoformat()},
@@ -272,27 +263,34 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
                 "context_1h_candle_open_utc": h1_open.isoformat(),
                 "context_4h_candle_open_utc": h4_open.isoformat(),
                 "data_asof_utc": asof.isoformat(), "funding_rate": 0.0,
-                "funding_kind": "0", "funding_event_time_ms": record["funding_event_time_ms"],
-                "funding_max_age_ms": record["funding_max_age_ms"], "elliott_wave": wave,
+                "funding_kind": "0", "funding_event_time_ms": funding_time,
+                "funding_max_age_ms": funding_max_age, "elliott_wave": wave,
             },
         }
-        ready, reason = challenge1_v2_execution_evidence_ready(record)
+
+    def test_no_rule_valid_impulse_is_unconfirmed_not_a_malformed_contract(self):
+        from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
+        wave = {
+            "status": "AMBIGUOUS", "pattern": "AMBIGUOUS",
+            "phase": "NO_RULE_VALID_IMPULSE", "wave_alignment": "UNCONFIRMED",
+            "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+            "data_asof_utc": "2026-11-25T18:00:00+00:00",
+            "latest_closed_candle_open_utc": "2026-11-25T17:00:00+00:00",
+            "confirmed_pivot_count": 2, "pivots": [],
+        }
+        ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
         self.assertTrue(ready, reason)
-        self.assertIn("NO_RULE_VALID_IMPULSE", wave["phase"])
 
     def test_opposed_elliott_still_fails_closed_with_field_diagnostics(self):
         from crypto_super_radar.challenge1_v2 import challenge1_v2_execution_evidence_ready
-        record = {
-            "signal": "LONG", "instrument_id": "BTC-USDT", "orders_submitted": False,
-            "challenge1_v2_evidence": {
-                "elliott_wave": {"status": "CANDIDATE", "pattern": "BEARISH",
-                    "phase": "WAVE_3_CONFIRMED", "wave_alignment": "OPPOSED",
-                    "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
-                    "data_asof_utc": "2026-11-25T18:00:00Z",
-                    "latest_closed_candle_open_utc": "2026-11-25T17:00:00Z"},
-            },
+        wave = {
+            "status": "CANDIDATE", "pattern": "BEARISH",
+            "phase": "WAVE_3_CONFIRMED", "wave_alignment": "OPPOSED",
+            "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+            "data_asof_utc": "2026-11-25T18:00:00+00:00",
+            "latest_closed_candle_open_utc": "2026-11-25T17:00:00+00:00",
         }
-        ready, reason = challenge1_v2_execution_evidence_ready(record)
+        ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
         self.assertFalse(ready)
         self.assertIn("wave_alignment_opposed", reason)
         self.assertIn("BEARISH", reason)
