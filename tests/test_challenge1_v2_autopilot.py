@@ -101,6 +101,17 @@ class Challenge1V2ExitManagerTests(unittest.TestCase):
         self.assertEqual(out["results"][0]["status"],"TIME_EXIT_SUBMITTED")
         self.assertEqual(exchange.calls[0][0],"time_exit"); self.assertEqual(store.state["status"],"TIME_EXIT_PENDING")
 
+    def test_time_exit_remains_active_after_tp1_and_break_even(self):
+        state=self.state()
+        state.update(tp1_executed=True,remaining_size="1",status="TP1_EXECUTED",
+                     break_even_stop_loss="100.15")
+        store,exchange=FakeStore(state),FakeExchange(mark="100.2")
+        out=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
+        self.assertEqual(out["results"][0]["status"],"TIME_EXIT_SUBMITTED")
+        self.assertEqual(exchange.calls[0][0],"time_exit")
+        self.assertEqual(exchange.calls[0][1].get("position_id"),"pos-1")
+        self.assertEqual(store.state["status"],"TIME_EXIT_PENDING")
+
 
 class FakeEntryExecutor:
     def __init__(self,store): self.store=store; self.called=0
