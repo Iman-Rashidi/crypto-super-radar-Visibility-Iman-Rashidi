@@ -729,7 +729,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             status = second_ai_connection_status()
         self.assertTrue(status["configured"], status["configuration_issues"])
         self.assertEqual(status["provider"], "Groq")
-        self.assertEqual(status["model"], "openai/gpt-oss-120b")
+        self.assertEqual(status["model"], "openai/gpt-oss-20b")
         self.assertTrue(status["credential_format_valid"])
         self.assertNotIn(env["GROQ_API_KEY"], json.dumps(status))
 
@@ -761,7 +761,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             "OPENROUTER_API_KEY": "primary-key",
             "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
             "CSR_SECOND_AI_API_KEY": "not-a-groq-key",
-            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b",
             "CSR_SECOND_AI_PROVIDER": "Groq",
             "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
         }
@@ -786,18 +786,70 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             "OPENROUTER_API_KEY": "primary-key",
             "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
             "CSR_SECOND_AI_API_KEY": "gsk_separate-groq-key",
-            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b",
             "CSR_SECOND_AI_PROVIDER": "GroqCloud",
             "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
         }
         with patch.dict(os.environ, env, clear=True):
             status = second_ai_connection_status()
         self.assertTrue(status["configured"], status["configuration_issues"])
-        self.assertEqual(status["model"], "openai/gpt-oss-120b")
+        self.assertEqual(status["model"], "openai/gpt-oss-20b")
+
+    def test_groq_primary_429_falls_back_to_qwen_and_verifies_actual_model(self):
+        calls = []
+        fallback_model = "qwen/qwen3.8-27b"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append(dict(json))
+            if len(calls) <= 2:
+                return FakeResponse(status_code=429)
+            return FakeResponse(document=valid_document(), model=fallback_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-openrouter-key",
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "crypto_super_radar.ai_second_opinion.time.sleep"
+        ):
+            review = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+
+        self.assertEqual([call["model"] for call in calls], [
+            "openai/gpt-oss-20b", "openai/gpt-oss-20b", fallback_model,
+        ])
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertEqual(review["model"], fallback_model)
+        self.assertEqual(review["returned_model"], fallback_model)
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["response_validated"])
+
+    def test_groq_no_trade_signal_never_calls_external_api(self):
+        from types import SimpleNamespace
+        no_trade = SimpleNamespace(
+            signal=SimpleNamespace(value="NO_TRADE"),
+            asset="cex:BTCUSDT",
+            metrics={"execution_profile": "CHALLENGE_1_V2"},
+        )
+        env = {
+            "OPENROUTER_API_KEY": "primary-openrouter-key",
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                no_trade, AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *_args, **_kwargs: self.fail(
+                    "NO_TRADE must not make an external Groq request"
+                ),
+            )
+        self.assertEqual(review["status"], "NOT_CALLED")
+        self.assertEqual(review["skip_reason_code"], "NO_DIRECTIONAL_SIGNAL")
+        self.assertFalse(review["request_attempted"])
 
     def test_existing_groq_secret_is_used_for_live_independent_review(self):
         captured = {}
-        model = "openai/gpt-oss-120b"
+        model = "openai/gpt-oss-20b"
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             captured.update({"url": url, "headers": headers, "payload": json})
@@ -832,7 +884,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertIn("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST", status["configuration_issues"])
         with patch.dict(os.environ, {
             **base,
-            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b",
             "CSR_SECOND_AI_API_URL": "https://other.example/v1/chat/completions",
         }, clear=True):
             status = second_ai_connection_status()
