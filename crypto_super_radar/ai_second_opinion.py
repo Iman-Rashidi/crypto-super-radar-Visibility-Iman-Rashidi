@@ -1509,7 +1509,18 @@ def _validated_v2_review(
         }
         or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH")
     ):
-        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+        raise ValueError(
+            "V2 Elliott phase/direction was not independently confirmed: "
+            + json.dumps({
+                "verdict": wave_verdict,
+                "phase": supplied_phase,
+                "expected_phase": expected_phase,
+                "direction": supplied_direction,
+                "expected_direction": expected_direction,
+                "expected_side": expected_side,
+                "generic_status": result.get("status"),
+            }, sort_keys=True)
+        )
     for key, canonical, normalizer in (
         ("elliott_wave_phase", expected_phase, _normalize_v2_phase),
         ("elliott_wave_direction", expected_direction, _normalize_v2_direction),
