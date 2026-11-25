@@ -87,8 +87,8 @@ def rank_top1_momentum(client: Any, *, now_ms: int | None = None) -> list[dict[s
             direction = "LONG" if change > 0 else "SHORT"
         ranked.append({
             "symbol": symbol, "direction": direction,
-            "momentum_pct": format(change, "f"),
-            "absolute_momentum_pct": format(abs(change), "f"),
+            "momentum_pct": format(change.normalize(), "f"),
+            "absolute_momentum_pct": format(abs(change).normalize(), "f"),
             "latest_closed_candle_ms": last_four[-1][0],
             "ticker_ts_ms": ticker_ts, "symbol_order": order,
         })
