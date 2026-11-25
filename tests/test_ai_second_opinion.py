@@ -1595,6 +1595,19 @@ class V2WaveNormalizationRegressionTests(unittest.TestCase):
         self.assertEqual(result["expected_side"], "SHORT")
         self.assertEqual(result["wave_echo_source"], "INPUT_EVIDENCE_FALLBACK")
 
+
+    def test_uncertain_wave_review_is_not_misclassified_as_format_mismatch(self):
+        doc = self._document()
+        doc["wave_analyst"]["verdict"] = "UNCERTAIN"
+        from crypto_super_radar.ai_second_opinion import _validated_v2_review
+        with self.assertRaisesRegex(
+            ValueError, "V2 Elliott reviewer did not independently confirm",
+        ):
+            _validated_v2_review(
+                doc, "openai/gpt-oss-20b", "perp:BTCUSDT", expected_side="SHORT",
+                evidence={"elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"}},
+            )
+
     def test_conflicting_wave_direction_still_fails_closed(self):
         doc = self._document()
         doc["wave_analyst"]["direction"] = "uptrend"
