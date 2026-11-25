@@ -385,6 +385,7 @@ class BloFinDemoRiskPolicy:
     max_drawdown_pct: float = 0.05
     max_margin_usage_pct: float = 0.10
     max_aggregate_risk_pct: float = 0.005
+    max_position_notional_usdt: float | None = None
     max_leverage: int = 3
     max_concurrent_positions: int = 1
     max_orders_per_utc_day: int | None = None
@@ -415,6 +416,12 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Margin usage must be in (0, 25%]")
         if not 0 < self.max_aggregate_risk_pct <= 0.01:
             raise ValueError("Aggregate risk must be in (0, 1%]")
+        if self.max_position_notional_usdt is not None:
+            if isinstance(self.max_position_notional_usdt, bool):
+                raise ValueError("Maximum position notional must be a positive amount up to 5000 USDT")
+            max_notional = float(self.max_position_notional_usdt)
+            if not math.isfinite(max_notional) or not 0 < max_notional <= 5000:
+                raise ValueError("Maximum position notional must be a positive amount up to 5000 USDT")
         if self.max_orders_per_utc_day is not None and (
             isinstance(self.max_orders_per_utc_day, bool)
             or not 1 <= int(self.max_orders_per_utc_day) <= 5
@@ -548,6 +555,11 @@ def build_demo_order_plan(
     notional_per_contract = entry * contract_value
     margin_quantity = margin_budget * Decimal(int(leverage)) / notional_per_contract
     quantity_before_lot = min(risk_quantity, margin_quantity)
+    if policy.max_position_notional_usdt is not None:
+        notional_cap_quantity = (
+            Decimal(str(policy.max_position_notional_usdt)) / notional_per_contract
+        )
+        quantity_before_lot = min(quantity_before_lot, notional_cap_quantity)
     quantity = (quantity_before_lot / lot_size).to_integral_value(rounding=ROUND_FLOOR) * lot_size
     if quantity < min_size:
         raise BloFinDemoExecutionBlocked("Risk-sized quantity is below the contract's minSize.")
@@ -580,6 +592,7 @@ def build_demo_order_plan(
         "risk_budget_usdt": float(risk_budget),
         "risk_per_contract_usdt": float(risk_per_contract),
         "notional_usdt": float(quantity * notional_per_contract),
+        "max_position_notional_usdt": policy.max_position_notional_usdt,
         "estimated_initial_margin_usdt": float(reserved_margin),
         "reserved_risk_usdt": _format_decimal(reserved_risk),
         "reserved_margin_usdt": _format_decimal(reserved_margin),

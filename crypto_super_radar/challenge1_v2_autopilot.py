@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 import hashlib
 import json
 import os
@@ -50,11 +51,12 @@ def build_v2_demo_risk_policy():
     """Return the explicit four-slot V2 Demo policy with conservative 1x risk caps."""
     from .blofin_demo_executor import BloFinDemoRiskPolicy
     return BloFinDemoRiskPolicy(
-        risk_per_trade_pct=0.0025,
+        risk_per_trade_pct=0.005,
         daily_loss_limit_pct=0.01,
         max_drawdown_pct=0.05,
         max_margin_usage_pct=0.10,
         max_aggregate_risk_pct=0.005,
+        max_position_notional_usdt=5000.0,
         max_leverage=1,
         max_concurrent_positions=4,
     )
@@ -279,10 +281,25 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             from .telegram_notifier import TelegramNotifier
             from .database import connect_database
             notifier = TelegramNotifier(
-                token=os.getenv("TELEGRAM_BOT_TOKEN"),
+                token=str(env.get("TELEGRAM_BOT_TOKEN") or ""),
                 connection_factory=connect_database,
             )
-        except Exception:
+            try:
+                recipient = notifier.resolve_recipient()
+                logging.getLogger(__name__).info(
+                    "TELEGRAM_RECIPIENT_LOCK_READY username=@%s chat_id=%s",
+                    recipient["username"], recipient["chat_id"],
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "TELEGRAM_RECIPIENT_LOCK_PENDING error_type=%s",
+                    type(exc).__name__,
+                )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "TELEGRAM_NOTIFIER_INIT_FAILED error_type=%s",
+                type(exc).__name__,
+            )
             notifier = None
     exit_summary=manage_open_positions(client,executor.store,notifier=notifier) if trading_active else {"positions_checked":0,"results":[]}
     rows=[]

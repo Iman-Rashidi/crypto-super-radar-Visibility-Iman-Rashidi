@@ -28,6 +28,15 @@ class Challenge1V2FourSlotPolicyTests(unittest.TestCase):
         self.assertEqual(reason, "MAX_CONCURRENT_POSITIONS_REACHED")
 
 
+    def test_v2_policy_uses_half_percent_risk_and_5000_usdt_notional_cap(self):
+        policy = build_v2_demo_risk_policy()
+        self.assertEqual(policy.risk_per_trade_pct, 0.005)
+        self.assertEqual(policy.max_position_notional_usdt, 5000.0)
+        self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
+        self.assertEqual(policy.max_leverage, 1)
+        self.assertEqual(policy.max_concurrent_positions, 4)
+
+
 class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
     def test_requires_explicit_enable_and_turso(self):
         self.assertIn("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED must be true",preflight_errors({}))

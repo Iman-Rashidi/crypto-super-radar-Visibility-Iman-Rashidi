@@ -369,6 +369,23 @@ class BloFinDemoV2OrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["take_profit"], "106")
         self.assertLessEqual(Decimal(plan["reserved_risk_usdt"]), Decimal("2.5"))
 
+    def test_v2_sizing_uses_half_percent_risk_and_caps_notional_at_5000_usdt(self):
+        policy = BloFinDemoRiskPolicy(
+            risk_per_trade_pct=0.005,
+            max_margin_usage_pct=0.10,
+            max_position_notional_usdt=5000.0,
+            max_leverage=1,
+            max_concurrent_positions=4,
+        )
+        plan = build_demo_order_plan(
+            v2_signal_record(), instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=100000, leverage=1, policy=policy,
+        )
+        self.assertEqual(plan["risk_budget_usdt"], 500.0)
+        self.assertEqual(plan["notional_usdt"], 5000.0)
+        self.assertEqual(plan["max_position_notional_usdt"], 5000.0)
+        self.assertEqual(plan["leverage"], 1)
+
     def test_v2_plan_rejects_missing_or_unsupported_funding_proof(self):
         for field, value in (("funding_kind", None), ("funding_kind", "1"),
                              ("funding_event_time_ms", None), ("funding_max_age_ms", 0)):

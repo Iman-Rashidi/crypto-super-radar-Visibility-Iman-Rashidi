@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import threading
 from typing import Any, Callable, Mapping
@@ -15,6 +16,7 @@ import requests
 
 API_BASE = "https://api.telegram.org"
 TARGET_USERNAME = "Germany004"
+TARGET_CHAT_ID = 1196927671
 SMOKE_MESSAGE = "✅ اتصال نوتیفیکیشن CRYPTO SUPER RADAR به حساب @Germany004 برقرار شد."
 
 
@@ -94,6 +96,7 @@ class TelegramNotifier:
         return [row for row in updates if isinstance(row, Mapping)]
 
     def resolve_recipient(self) -> dict[str, int | str]:
+        """Resolve and persist the one user-approved private Telegram destination."""
         db = self._connection()
         close_db = db is not self.connection
         try:
@@ -101,43 +104,63 @@ class TelegramNotifier:
             locked = db.execute(
                 "SELECT username, chat_id, user_id FROM telegram_recipient_lock WHERE lock_key='primary'"
             ).fetchone()
-            if locked is not None:
-                return {"username": str(locked[0]), "chat_id": int(locked[1]), "user_id": int(locked[2])}
+            if (
+                locked is not None
+                and str(locked[0]).casefold() == TARGET_USERNAME.casefold()
+                and int(locked[1]) == TARGET_CHAT_ID
+                and int(locked[2]) == TARGET_CHAT_ID
+            ):
+                return {
+                    "username": TARGET_USERNAME,
+                    "chat_id": TARGET_CHAT_ID,
+                    "user_id": TARGET_CHAT_ID,
+                }
 
-            updates = self._rows(self._api("getUpdates", {"limit": 100, "timeout": 0})["result"])
-            matches = []
-            for update in updates:
-                message = update.get("message") or update.get("edited_message")
-                if not isinstance(message, Mapping):
-                    continue
-                sender = message.get("from")
-                chat = message.get("chat")
-                if not isinstance(sender, Mapping) or not isinstance(chat, Mapping):
-                    continue
-                username = str(sender.get("username") or "")
-                if username.casefold() != TARGET_USERNAME.casefold():
-                    continue
-                try:
-                    user_id, chat_id = int(sender["id"]), int(chat["id"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                matches.append((int(update.get("update_id") or 0), user_id, chat_id, username))
-            if not matches:
+            chat = self._api("getChat", {"chat_id": TARGET_CHAT_ID}).get("result")
+            if not isinstance(chat, Mapping):
+                raise TelegramNotificationError("Pinned Telegram destination returned an invalid chat record.")
+            try:
+                actual_chat_id = int(chat.get("id"))
+            except (TypeError, ValueError):
+                raise TelegramNotificationError("Pinned Telegram destination has no valid numeric chat_id.")
+            actual_username = str(chat.get("username") or "")
+            if (
+                actual_chat_id != TARGET_CHAT_ID
+                or str(chat.get("type") or "").casefold() != "private"
+                or actual_username.casefold() != TARGET_USERNAME.casefold()
+            ):
                 raise TelegramNotificationError(
-                    f"No Telegram update from @{TARGET_USERNAME} was found; user must start the bot first."
+                    "Telegram getChat did not verify the configured private account identity."
                 )
-            _, user_id, chat_id, username = max(matches, key=lambda item: item[0])
+
+            # Repair a stale lock only after Telegram verifies the approved ID and username.
             db.execute(
-                "INSERT OR IGNORE INTO telegram_recipient_lock(lock_key,username,chat_id,user_id) VALUES('primary',?,?,?)",
-                (username, chat_id, user_id),
+                """
+                INSERT INTO telegram_recipient_lock(lock_key,username,chat_id,user_id)
+                VALUES('primary',?,?,?)
+                ON CONFLICT(lock_key) DO UPDATE SET
+                    username=excluded.username,
+                    chat_id=excluded.chat_id,
+                    user_id=excluded.user_id
+                """,
+                (TARGET_USERNAME, TARGET_CHAT_ID, TARGET_CHAT_ID),
             )
             db.commit()
             locked = db.execute(
                 "SELECT username, chat_id, user_id FROM telegram_recipient_lock WHERE lock_key='primary'"
             ).fetchone()
-            if locked is None or int(locked[1]) != chat_id or int(locked[2]) != user_id:
-                raise TelegramNotificationError("Telegram recipient is already locked to a different account.")
-            return {"username": str(locked[0]), "chat_id": int(locked[1]), "user_id": int(locked[2])}
+            if (
+                locked is None
+                or str(locked[0]).casefold() != TARGET_USERNAME.casefold()
+                or int(locked[1]) != TARGET_CHAT_ID
+                or int(locked[2]) != TARGET_CHAT_ID
+            ):
+                raise TelegramNotificationError("Pinned Telegram recipient lock could not be verified after write.")
+            return {
+                "username": TARGET_USERNAME,
+                "chat_id": TARGET_CHAT_ID,
+                "user_id": TARGET_CHAT_ID,
+            }
         finally:
             if close_db:
                 db.close()
@@ -197,17 +220,23 @@ class TelegramNotifier:
                 db.close()
 
     def notify_async(self, event_key: str, message: str) -> None:
-        """Queue one bounded network attempt on a daemon thread; never block trading."""
+        """Deliver after the trade event without letting process shutdown kill the alert."""
         def deliver() -> None:
             try:
                 self.send_once(event_key, message)
             except Exception:
-                # Deliberately swallowed: notification failure is not a trade failure.
-                return
+                # Alert failure is isolated from trading, but remains visible in logs.
+                logging.getLogger(__name__).exception(
+                    "Telegram notification failed for event_key=%s", event_key
+                )
         try:
-            threading.Thread(target=deliver, name="csr-telegram-alert", daemon=True).start()
+            # Non-daemon workers keep the CLI process alive until the bounded HTTP
+            # attempt (3s connect / 5s read) has completed.
+            threading.Thread(target=deliver, name="csr-telegram-alert", daemon=False).start()
         except Exception:
-            return
+            logging.getLogger(__name__).exception(
+                "Telegram notification worker could not be started for event_key=%s", event_key
+            )
 
 
 def send_smoke_test() -> dict[str, Any]:
