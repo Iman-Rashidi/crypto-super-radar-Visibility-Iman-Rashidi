@@ -11,6 +11,8 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from .ai_second_opinion import GROQ_DEFAULT_MODEL, GROQ_FALLBACK_MODEL, GROQ_ALLOWED_MODELS
+
 SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 TABLE = "challenge1_v2_autopilot_cycles"
 
@@ -353,7 +355,10 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
         "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted,
         "open_position_limit":4,"position_limit_enforced":trading_active,
         "tpsl_verified":trading_active,"exit_manager":exit_summary,
-        "ai_reviews_performed":any(bool(row.get("ai_reviews")) for row in rows),"persistence":"TURSO"}
+        "ai_reviews_performed":any(bool(row.get("ai_reviews")) for row in rows),
+        "ai_model_policy":{"provider":"Groq","primary_model":GROQ_DEFAULT_MODEL,
+            "fallback_model":GROQ_FALLBACK_MODEL,"allowlist":sorted(GROQ_ALLOWED_MODELS)},
+        "persistence":"TURSO"}
 
 
 def main() -> int:
