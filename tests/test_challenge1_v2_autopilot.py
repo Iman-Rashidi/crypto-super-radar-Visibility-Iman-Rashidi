@@ -275,7 +275,12 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
             "timeframe": "1H", "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
             "data_asof_utc": "2026-11-25T18:00:00+00:00",
             "latest_closed_candle_open_utc": "2026-11-25T17:00:00+00:00",
-            "confirmed_pivot_count": 6, "pivots": [],
+            "confirmed_pivot_count": 3, "invalidation_price": 95.0,
+            "pivots": [
+                {"timestamp": "2026-11-25T17:00:00+00:00", "confirmed_at": "2026-11-25T17:10:00+00:00", "kind": "LOW", "price": 96.0},
+                {"timestamp": "2026-11-25T17:20:00+00:00", "confirmed_at": "2026-11-25T17:30:00+00:00", "kind": "HIGH", "price": 102.0},
+                {"timestamp": "2026-11-25T17:40:00+00:00", "confirmed_at": "2026-11-25T17:50:00+00:00", "kind": "LOW", "price": 98.0},
+            ],
         }
         ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
         self.assertTrue(ready, reason)
@@ -292,7 +297,7 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
         }
         ready, reason = challenge1_v2_execution_evidence_ready(self._record(wave))
         self.assertFalse(ready)
-        self.assertIn("confirmed_wave_phase_invalid", reason)
+        self.assertIn("no_rule_valid_impulse", reason)
         self.assertIn("NO_RULE_VALID_IMPULSE", reason)
 
     def test_opposed_elliott_still_fails_closed_with_field_diagnostics(self):

@@ -1165,10 +1165,8 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     phase = str(wave.get("phase") or "").strip().upper()
     wave_pattern = str(wave.get("pattern") or "").strip().upper()
     wave_alignment = str(wave.get("wave_alignment") or "").strip().upper()
-    # The Elliott engine deliberately emits NO_RULE_VALID_IMPULSE when the
-    # confirmed pivots do not form a rule-valid impulse. This is an
-    # unconfirmed/ambiguous state, not a confirmed directional phase. Keep it
-    # eligible for the existing reviewer path, which still cannot approve it.
+    # NO_RULE_VALID_IMPULSE is not a valid directional phase and must
+    # remain blocked even though the engine labels its status ambiguous.
     wave_unconfirmed = (
         wave_status in {"AMBIGUOUS", "UNKNOWN", "INSUFFICIENT_DATA"}
         or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN"}
@@ -1188,6 +1186,8 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         wave_checks.append("latest_closed_candle_open_utc_mismatch")
     if wave_alignment == "OPPOSED":
         wave_checks.append("wave_alignment_opposed")
+    if phase == "NO_RULE_VALID_IMPULSE":
+        wave_checks.append("no_rule_valid_impulse")
     if not wave_unconfirmed:
         if wave_status not in {"CANDIDATE", "CONFIRMED"}:
             wave_checks.append("confirmed_wave_status_invalid")
