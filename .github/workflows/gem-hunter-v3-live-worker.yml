@@ -24,6 +24,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   scan:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip-v2-demo]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
