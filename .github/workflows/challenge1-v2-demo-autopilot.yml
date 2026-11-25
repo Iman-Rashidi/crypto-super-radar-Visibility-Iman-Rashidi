@@ -43,7 +43,8 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED || 'true' }}
-      # The main-branch 15-minute dispatcher runs the full guarded V2 entry/exit cycle on Staging.
+      # Scheduled worker manages existing exits only; the dedicated one-shot workflow owns entries.
+      CHALLENGE_1_V2_MANAGE_ONLY: "true"
       CHALLENGE_1_V2_LEVERAGE: '1'
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
