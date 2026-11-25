@@ -16,8 +16,8 @@ def valid_approval():
         "response_source": "LIVE_API",
         "response_validated": True,
         "model_verified": True,
-        "model": "openai/gpt-oss-120b",
-        "returned_model": "openai/gpt-oss-120b",
+        "model": "openai/gpt-oss-20b",
+        "returned_model": "openai/gpt-oss-20b",
         "provider": "Groq",
         "expected_side": "LONG",
         "trader_proposal": "LONG",
@@ -81,8 +81,8 @@ class Challenge1V2SingleGroqReviewerTests(unittest.TestCase):
     def test_groq_veto_or_rate_limit_always_blocks(self):
         veto = {**valid_approval(), "status": "VETO", "paper_entry_eligible": False}
         limited = {
-            "provider": "Groq", "model": "openai/gpt-oss-120b",
-            "returned_model": "openai/gpt-oss-120b", "status": "UNKNOWN",
+            "provider": "Groq", "model": "openai/gpt-oss-20b",
+            "returned_model": "openai/gpt-oss-20b", "status": "UNKNOWN",
             "http_status": 429, "request_attempted": True,
             "response_source": "LIVE_API", "response_validated": False,
             "model_verified": False, "paper_entry_eligible": False,
