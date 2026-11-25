@@ -70,7 +70,7 @@ def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "signal_id", "ai_review", "second_ai_review", "ai_reviews", "ai_consensus",
         "ai_status", "ai_review_reason", "orders_submitted", "execution_result",
         "entry_skipped_reason", "mode", "exit_manager_summary",
-        "demo_entry_context", "easy_demo_entry_mode",
+        "demo_entry_context", "easy_demo_entry_mode", "entry_gate_policy",
         "elliott_rejection_reason", "elliott_evidence_snapshot")
     return {key: record.get(key) for key in allowed if key in record}
 
@@ -347,6 +347,11 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,
                 mode="MANAGEMENT_ONLY" if manage_only else "DRY_RUN",
                 exit_manager_summary=exit_summary.get("results", []))
+            if easy_demo_entry_mode:
+                safe.update(
+                    easy_demo_entry_mode=True,
+                    entry_gate_policy="EASY_DEMO_ENTRY_STRICT_EXIT",
+                )
             consensus=safe.get("ai_consensus")
             approved = (
                 isinstance(consensus, Mapping)
@@ -395,7 +400,18 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
         "mode":"DEMO_AUTOPILOT" if trading_active else "DRY_RUN","environment":"BLOFIN_DEMO",
         "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted,
         "open_position_limit":4,"position_limit_enforced":trading_active,
-        "entry_mode":"EASY_DEMO" if easy_demo_entry_mode else "STANDARD",
+        "entry_mode":"EASY_DEMO_ENTRY_STRICT_EXIT" if easy_demo_entry_mode else "STANDARD",
+        "entry_gate_policy":{
+            "opposed_4h":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
+            "btc_master_guard":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
+            "elliott_wave":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
+            "m15_candle_momentum":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
+            "m15_rsi_alignment":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
+            "hard_safety_gates":["fresh_market_data","funding_freshness","spread_cap",
+                "atr_shock_cap","valid_stop_geometry","groq_signal_approval",
+                "isolated_margin","1x_leverage","full_size_exchange_sl",
+                "four_position_capacity","same_candle_idempotency"],
+        },
         "risk_policy":{"risk_per_trade_pct":0.005,"max_aggregate_risk_pct":0.005,
             "daily_loss_limit_pct":0.01,"max_margin_usage_pct":0.10,"leverage":1},
         "tpsl_verified":trading_active,"exit_manager":exit_summary,

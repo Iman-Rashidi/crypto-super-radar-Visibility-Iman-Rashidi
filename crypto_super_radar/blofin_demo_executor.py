@@ -113,6 +113,36 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     return record
 
 
+def _easy_demo_entry_enabled() -> bool:
+    """Return true only for the explicitly enabled BloFin Demo Easy Entry mode."""
+    return (
+        str(os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "")).strip().lower() == "true"
+    )
+
+
+def _v2_elliott_entry_gate_allows(side: str, wave: Mapping[str, Any], *,
+                                 easy_demo_entry: bool | None = None) -> bool:
+    """Keep Elliott structural alignment advisory only in explicitly enabled Demo mode."""
+    enabled = _easy_demo_entry_enabled() if easy_demo_entry is None else bool(easy_demo_entry)
+    direction = str(side or "").strip().upper()
+    if direction not in {"LONG", "SHORT"} or not isinstance(wave, Mapping):
+        return False
+    if enabled:
+        # The V2 evidence validator has already enforced timeframe, closed-candle
+        # provenance and as-of consistency. Do not demand a valid impulse here.
+        return True
+    allowed_phases = {
+        "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+    }
+    expected = "BULLISH" if direction == "LONG" else "BEARISH"
+    return (
+        str(wave.get("phase") or "").strip().upper() in allowed_phases
+        and str(wave.get("pattern") or "").strip().upper() == expected
+    )
+
+
 def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
     """Require two independent, live, verified AI approvals bound to one Challenge 1 signal."""
     execution_profile = str(record.get("execution_profile") or "").strip().upper()
@@ -139,11 +169,15 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
     }
     expected_direction = "BULLISH" if side == "LONG" else "BEARISH" if side == "SHORT" else ""
-    if (
-        side not in {"LONG", "SHORT"}
-        or wave_phase not in allowed_phases
-        or wave_direction != expected_direction
-    ):
+    if execution_profile == "CHALLENGE_1_V2":
+        wave_gate_ready = _v2_elliott_entry_gate_allows(side, wave)
+    else:
+        wave_gate_ready = (
+            side in {"LONG", "SHORT"}
+            and wave_phase in allowed_phases
+            and wave_direction == expected_direction
+        )
+    if not wave_gate_ready:
         return False, "A valid directional signal and aligned confirmed Elliott phase are required."
 
     consensus = record.get("ai_consensus")

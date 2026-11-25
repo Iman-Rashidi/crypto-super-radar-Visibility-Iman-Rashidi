@@ -501,3 +501,46 @@ class Challenge1V2EntryStateLinkageTests(unittest.TestCase):
         self.assertEqual(saved["position_id"], "pos-1")
         self.assertEqual(saved["sl_tpsl_id"], "tpsl-verified-1")
         self.assertEqual(saved["remaining_size"], "2")
+
+
+
+class Challenge1V2EasyDemoAutopilotPolicyTests(unittest.TestCase):
+    def test_easy_demo_mode_is_reported_only_when_both_trade_flags_are_active(self):
+        db = sqlite3.connect(":memory:")
+        store = FakeStore({})
+        executor = FakeEntryExecutor(store)
+        signal = {
+            "execution_profile": "CHALLENGE_1_V2",
+            "instrument_id": "BTC-USDT",
+            "signal": "NO_TRADE",
+            "status": "NO_TRADE",
+        }
+        env = {
+            "CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+        }
+        out = run_cycle(object(), db, analyzer=lambda *_: signal,
+                        symbols=("BTC-USDT",), executor=executor, environ=env)
+        self.assertEqual(out["entry_mode"], "EASY_DEMO_ENTRY_STRICT_EXIT")
+        self.assertEqual(out["open_position_limit"], 4)
+        self.assertEqual(out["risk_policy"]["risk_per_trade_pct"], 0.005)
+        self.assertEqual(out["risk_policy"]["leverage"], 1)
+        self.assertEqual(out["entry_gate_policy"]["elliott_wave"], "ADVISORY")
+        self.assertIn("full_size_exchange_sl", out["entry_gate_policy"]["hard_safety_gates"])
+        self.assertFalse(out["orders_submitted"])
+        db.close()
+
+    def test_easy_demo_flag_without_demo_trade_flag_stays_standard(self):
+        db = sqlite3.connect(":memory:")
+        signal = {"execution_profile": "CHALLENGE_1_V2", "signal": "NO_TRADE",
+                  "status": "NO_TRADE"}
+        env = {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true",
+               "BLOFIN_DEMO_TRADING_ENABLED": "false",
+               "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true"}
+        out = run_cycle(object(), db, analyzer=lambda *_: signal,
+                        symbols=("BTC-USDT",), environ=env)
+        self.assertEqual(out["entry_mode"], "STANDARD")
+        self.assertEqual(out["risk_policy"]["leverage"], 1)
+        self.assertFalse(out["orders_submitted"])
+        db.close()

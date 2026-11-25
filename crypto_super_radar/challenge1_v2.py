@@ -1485,6 +1485,11 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": "stop distance breaches 3.5% volatility cap", "regime": regime}
 
     if _easy_demo_entry_enabled():
+        # Easy Demo: H1 EMA21 direction is the directional trigger. Lower-timeframe
+        # momentum/RSI, 4H opposition, BTC alignment and Elliott structure are
+        # retained as advisory evidence; they cannot veto a valid directional
+        # signal. Data freshness, funding/spread, ATR shock and protective-stop
+        # geometry remain hard safety gates above.
         ema15_slope = float(e21.iloc[-1] - e21.iloc[-4])
         ema15_slope_advisory = (
             float(last["close"]) > float(e21.iloc[-1]) and ema15_slope > 0
@@ -1492,25 +1497,22 @@ def analyze_signal(
             float(last["close"]) < float(e21.iloc[-1]) and ema15_slope < 0
         )
         confirmation = _easy_demo_entry_confirmation(direction, last, rsi_value)
-        if not confirmation["confirmed"]:
-            return {
-                "signal": "NO_TRADE",
-                "reason": "Easy Demo requires 1H EMA21 direction plus aligned 15m RSI and closed-candle body momentum",
-                "regime": regime,
-                "demo_entry_context": {
-                    **confirmation,
-                    "ema15_slope_advisory": bool(ema15_slope_advisory),
-                    "rsi_15m": rsi_value,
-                    "btc_master_aligned": bool(btc_ok),
-                    "h4_opposed": bool(regime.get("opposed_4h")),
-                },
-            }
+        demo_entry_context = {
+            **confirmation,
+            "ema15_slope_advisory": bool(ema15_slope_advisory),
+            "rsi_15m": rsi_value,
+            "btc_master_aligned": bool(btc_ok),
+            "h4_opposed": bool(regime.get("opposed_4h")),
+            "elliott_alignment": None,
+            "advisory_gates": ["opposed_4h", "btc_master_guard", "elliott_wave",
+                               "m15_candle_momentum", "m15_rsi_alignment"],
+        }
         score_parts = {
-            "h1_close_vs_ema21": 35,
-            "m15_candle_momentum": 35,
-            "m15_rsi_alignment": 25,
-            "h4_context_bonus": 3 if regime.get("aligned_4h") else 0,
-            "btc_context_bonus": 2 if btc_ok else 0,
+            "h1_close_vs_ema21_direction": 80,
+            "m15_momentum_advisory": 5 if confirmation["candle_momentum"] else 0,
+            "m15_rsi_advisory": 5 if confirmation["rsi_aligned"] else 0,
+            "h4_alignment_advisory": 5 if regime.get("aligned_4h") else 0,
+            "btc_alignment_advisory": 5 if btc_ok else 0,
         }
     else:
         score_parts = {
@@ -1564,6 +1566,15 @@ def analyze_signal(
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
         "easy_demo_entry_mode": _easy_demo_entry_enabled(),
+        "entry_gate_policy": (
+            "EASY_DEMO_ENTRY_STRICT_EXIT" if _easy_demo_entry_enabled()
+            else "STANDARD_CHALLENGE_1_V2"
+        ),
+        "advisory_entry_gates": (
+            ["opposed_4h", "btc_master_guard", "elliott_wave",
+             "m15_candle_momentum", "m15_rsi_alignment"]
+            if _easy_demo_entry_enabled() else []
+        ),
         "elliott_is_advisory": _easy_demo_entry_enabled(),
     }
     return {

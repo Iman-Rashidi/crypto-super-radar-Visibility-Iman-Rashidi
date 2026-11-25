@@ -110,3 +110,48 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class Challenge1V2EasyDemoEntryModeTests(unittest.TestCase):
+    def test_btc_and_elliott_context_gates_are_advisory_only_when_demo_mode_is_explicit(self):
+        import os
+        from crypto_super_radar import challenge1_v2 as strategy
+        from crypto_super_radar import blofin_demo_executor as executor
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+        }, clear=False):
+            self.assertTrue(strategy._easy_demo_entry_enabled())
+            self.assertTrue(strategy._btc_master_guard_allows_entry(False))
+            wave = {"phase": "NO_RULE_VALID_IMPULSE", "pattern": "AMBIGUOUS",
+                    "wave_alignment": "UNCONFIRMED"}
+            self.assertTrue(executor._v2_elliott_entry_gate_allows("LONG", wave))
+            self.assertTrue(executor._v2_elliott_entry_gate_allows("SHORT", {
+                "phase": "WAVE_3_CONFIRMED", "pattern": "BULLISH",
+                "wave_alignment": "OPPOSED",
+            }))
+
+    def test_easy_demo_mode_never_activates_without_both_demo_flags(self):
+        import os
+        from crypto_super_radar import challenge1_v2 as strategy
+        from crypto_super_radar import blofin_demo_executor as executor
+        with patch.dict(os.environ, {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "false",
+        }, clear=False):
+            self.assertFalse(strategy._easy_demo_entry_enabled())
+            self.assertFalse(executor._v2_elliott_entry_gate_allows(
+                "LONG", {"phase": "NO_RULE_VALID_IMPULSE", "pattern": "AMBIGUOUS"}
+            ))
+
+    def test_non_demo_v2_still_requires_aligned_confirmed_elliott(self):
+        from crypto_super_radar import blofin_demo_executor as executor
+        wave = {"phase": "NO_RULE_VALID_IMPULSE", "pattern": "AMBIGUOUS"}
+        self.assertFalse(executor._v2_elliott_entry_gate_allows(
+            "LONG", wave, easy_demo_entry=False
+        ))
+        self.assertTrue(executor._v2_elliott_entry_gate_allows(
+            "LONG", {"phase": "WAVE_3_CONFIRMED", "pattern": "BULLISH"},
+            easy_demo_entry=False
+        ))
