@@ -83,7 +83,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP"
+          set +e
           python -m crypto_super_radar.challenge1_v2_autopilot | tee "$RUNNER_TEMP/challenge1-v2-cycle.json"
+          worker_exit=${PIPESTATUS[0]}
+          set -e
+          cycle_status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))' "$RUNNER_TEMP/challenge1-v2-cycle.json")"
+          if [[ "$cycle_status" == "CYCLE_PARTIAL" && "$worker_exit" -eq 3 ]]; then
+            echo "CYCLE_PARTIAL is a valid no-entry/partial market outcome; infrastructure and persistence checks continue."
+            exit 0
+          fi
+          if [[ "$worker_exit" -ne 0 ]]; then
+            echo "V2 worker failed technically (exit=$worker_exit, status=$cycle_status)." >&2
+            exit "$worker_exit"
+          fi
       - name: Read back and verify the five Turso cycle records
         if: always()
         shell: bash
