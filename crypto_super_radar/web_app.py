@@ -5558,7 +5558,7 @@ def _run_blofin_demo_v2_readonly_job(
             _set_blofin_execution_job(
                 job_id, "completed", stage=stage,
                 message_fa=(
-                    "سفارش Demo فقط یک‌بار ارسال شد؛ Fill، شناسه پوزیشن و TP/SL پس از Fill از API خواندنی تطبیق داده شدند."
+                    "سفارش Demo فقط یک‌بار ارسال شد؛ Fill، شناسه پوزیشن و SL کامل از API خواندنی تطبیق داده شدند؛ TP1 در مدیر V2 باقی می‌ماند."
                     if stage == "V2_SINGLE_SHOT_POST_FILL_VERIFIED"
                     else "وضعیت اجرای تک‌معامله Demo نیازمند بررسی است؛ سفارش مجدد یا Retry خودکار انجام نمی‌شود."
                 ),
@@ -5579,7 +5579,8 @@ def _run_blofin_demo_v2_readonly_job(
                     "execution_profile": "CHALLENGE_1_V2",
                     "orders_submitted": True,
                     "trade_executed": filled,
-                    "post_fill_tp_sl_verified": protection.get("verified") is True,
+                    "post_fill_sl_verified": protection.get("sl_verified") is True,
+                    "exchange_tp_required": protection.get("tp_required", True),
                     "single_shot_lock": store.single_shot_lock_status(),
                     "retry_allowed": False,
                 },
