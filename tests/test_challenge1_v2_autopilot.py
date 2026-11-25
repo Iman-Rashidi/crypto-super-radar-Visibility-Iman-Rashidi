@@ -324,3 +324,36 @@ class Challenge1V2ElliottDiagnosticsRegressionTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("wave_alignment_opposed", reason)
         self.assertIn("BEARISH", reason)
+
+
+class Challenge1V2ManagerOnlyModeTests(unittest.TestCase):
+    def test_scheduled_manager_only_cycle_never_analyzes_or_opens_new_entries(self):
+        db = sqlite3.connect(":memory:")
+        store = FakeStore({})
+        executor = FakeEntryExecutor(store)
+        exchange = FakeExchange()
+        class NoopNotifier:
+            def notify_async(self, *_args, **_kwargs):
+                pass
+        def forbidden_analyzer(*_args):
+            raise AssertionError("manager-only cycle must not analyze new candidates")
+        env = {
+            "CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "CHALLENGE_1_V2_MANAGE_ONLY": "true",
+        }
+        try:
+            result = run_cycle(
+                exchange, db, analyzer=forbidden_analyzer, symbols=("BTC-USDT", "ETH-USDT"),
+                executor=executor, environ=env, notifier=NoopNotifier(),
+            )
+            self.assertEqual(result["status"], "CYCLE_COMPLETED")
+            self.assertFalse(result["orders_submitted"])
+            self.assertEqual(executor.called, 0)
+            self.assertEqual([row["status"] for row in result["symbols"]],
+                             ["MANAGEMENT_ONLY", "MANAGEMENT_ONLY"])
+            self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0], 2)
+        finally:
+            db.close()
+
+
