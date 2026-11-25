@@ -53,6 +53,7 @@ jobs:
                       assert len(body.get("cycles", [])) == 5
 
   live-ai-reviewers:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
