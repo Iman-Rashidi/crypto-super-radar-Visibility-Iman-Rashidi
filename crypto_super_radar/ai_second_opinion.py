@@ -63,12 +63,12 @@ def _post_groq_with_rate_limit(
         try:
             response = paced_post(primary_model)
         except (requests.Timeout, requests.ConnectionError):
-            if primary_model != GROQ_DEFAULT_MODEL:
+            if normalize_groq_model_id(primary_model) != normalize_groq_model_id(GROQ_DEFAULT_MODEL):
                 raise
             response = None
         else:
             status = int(getattr(response, "status_code", 0) or 0)
-            if status != 429 or primary_model != GROQ_DEFAULT_MODEL:
+            if status != 429 or normalize_groq_model_id(primary_model) != normalize_groq_model_id(GROQ_DEFAULT_MODEL):
                 return response
 
         # Never retry the primary in the same cycle; use one approved fallback attempt.
@@ -2417,7 +2417,8 @@ def second_ai_connection_status() -> dict[str, Any]:
     # suffix. Keep the supported free-plan models and endpoint explicitly allowlisted.
     if provider_key in {"groq", "groqcloud"}:
         free_models = GROQ_ALLOWED_MODELS
-        if model and model not in free_models:
+        allowed_model_ids = {normalize_groq_model_id(item) for item in free_models}
+        if model and normalize_groq_model_id(model) not in allowed_model_ids:
             reasons.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
         # Official Groq API keys use the gsk_ prefix. This is a format-only
         # preflight; a 401 can still mean an expired/revoked/wrong-account key.

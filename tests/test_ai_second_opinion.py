@@ -1806,3 +1806,16 @@ class GroqModelAllowlistNormalizationTests(unittest.TestCase):
             normalize_groq_model_id("qwen/qwen3.8-27b:production"),
             {normalize_groq_model_id(item) for item in GROQ_ALLOWED_MODELS},
         )
+
+    def test_second_ai_groq_connection_accepts_revision_suffix_for_active_model(self):
+        env = {
+            "CSR_SECOND_AI_PROVIDER": "groq",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b:active-revision",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+            "CSR_SECOND_AI_API_KEY": "gsk_second_demo_key",
+            "GROQ_API_KEY": "gsk_second_demo_key",
+            "OPENROUTER_API_KEY": "or_separate_key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])
