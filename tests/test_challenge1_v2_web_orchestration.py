@@ -240,9 +240,9 @@ class FakeBloFinDemoTradeClient(FakeBloFinReadOnly):
         return [{
             "tpslId": "v2-fake-tpsl-1",
             "clientOrderId": client_order_id,
-            "positionId": self.position_id,
             "instId": inst_id,
             "positionSide": self.order_args["position_side"],
+            "marginMode": "isolated",
             "side": "sell" if self.order_args["side"] == "buy" else "buy",
             "size": self.order_args["size"],
             "actualSize": self.order_args["size"],

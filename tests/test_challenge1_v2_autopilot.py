@@ -73,8 +73,12 @@ class FakeExchange:
     def get_positions(self,inst_id=None):
         return [{"instId":"BTC-USDT","positionId":"pos-1","positionSide":"net","positions":"2"}]
     def get_mark_price(self,*,inst_id): return [{"markPrice":self.mark}]
-    def get_open_tpsl_orders(self,*,inst_id,client_order_id,limit):
-        return [{"positionId":"pos-1","state":"live","slTriggerPrice":"98","tpslId":"tpsl-1"}]
+    def get_open_tpsl_orders(self,*,inst_id,client_order_id=None,tpsl_id=None,limit=100):
+        return [{
+            "instId":inst_id,"positionSide":"net","marginMode":"isolated",
+            "side":"sell","state":"live","size":"2","actualSize":"2",
+            "slTriggerPrice":"98","slTriggerPriceType":"mark","tpslId":"tpsl-1",
+        }]
     def partial_close_reduce_only(self,**kw): self.calls.append(("partial",kw)); return {"data":[{"orderId":"tp1"}]}
     def get_order_detail(self,inst_id,*,client_order_id):
         return [{"clientOrderId":client_order_id,"state":"filled","filledSize":"1"}]
