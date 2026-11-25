@@ -30,10 +30,15 @@ _GROQ_MIN_INTERVAL_SECONDS = 2.5
 _GROQ_429_RETRY_DELAY_SECONDS = 3.0
 
 
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
+GROQ_ALLOWED_MODELS = frozenset({GROQ_DEFAULT_MODEL, GROQ_FALLBACK_MODEL})
+
+
 def _post_groq_with_rate_limit(
     post, endpoint, *, headers, payload, timeout, allow_redirects,
 ):
-    """Serialize Groq calls, pace starts, and retry one HTTP 429 exactly once."""
+    """Pace Groq requests; retry primary once, then fail over to the approved model."""
     global _GROQ_LAST_REQUEST_STARTED
     with _GROQ_REQUEST_LOCK:
         for attempt in range(2):
@@ -47,10 +52,24 @@ def _post_groq_with_rate_limit(
                 timeout=timeout, allow_redirects=allow_redirects,
             )
             status = int(getattr(response, "status_code", 0) or 0)
-            if status != 429 or attempt == 1:
+            if status != 429:
                 return response
-            time.sleep(_GROQ_429_RETRY_DELAY_SECONDS)
-        return response
+            if attempt == 0:
+                time.sleep(_GROQ_429_RETRY_DELAY_SECONDS)
+
+        primary_model = str(payload.get("model") or "").strip()
+        if primary_model != GROQ_DEFAULT_MODEL:
+            return response
+        payload["model"] = GROQ_FALLBACK_MODEL
+        elapsed = time.monotonic() - _GROQ_LAST_REQUEST_STARTED
+        wait = max(0.0, _GROQ_MIN_INTERVAL_SECONDS - elapsed)
+        if wait:
+            time.sleep(wait)
+        _GROQ_LAST_REQUEST_STARTED = time.monotonic()
+        return post(
+            endpoint, headers=headers, json=payload,
+            timeout=timeout, allow_redirects=allow_redirects,
+        )
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
@@ -1369,7 +1388,7 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 "model_verified": False, "latency_ms": latency_ms,
                 "paper_entry_eligible": False,
             }
-        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+        if returned_model.strip().split(":", 1)[0] != request_model.split(":", 1)[0]:
             return {
                 "provider": "OpenRouter", "model": model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
@@ -2002,10 +2021,10 @@ def run_free_ai_second_opinion(
         def validate_candidate(document):
             return (
                 _validated_v2_review(
-                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
+                    document, request_model, asset_name, expected_side=expected_side, evidence=evidence,
                 )
                 if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
+                else _validated_pattern_review(document, request_model, asset_name, evidence=evidence)
                 if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
                 else _validated_review(
                     document, model, asset_name, expected_side=expected_side, market_type=market_type
@@ -2106,7 +2125,7 @@ def second_ai_connection_status() -> dict[str, Any]:
     groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
     key = (os.getenv("CSR_SECOND_AI_API_KEY") or groq_key).strip()
     model = (os.getenv("CSR_SECOND_AI_MODEL") or (
-        "openai/gpt-oss-120b" if groq_key else ""
+        GROQ_DEFAULT_MODEL if groq_key else ""
     )).strip()
     provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or (
         "Groq" if groq_key else ""
@@ -2133,11 +2152,7 @@ def second_ai_connection_status() -> dict[str, Any]:
     # Groq publishes its own free-plan model IDs without OpenRouter's ":free"
     # suffix. Keep the supported free-plan models and endpoint explicitly allowlisted.
     if provider_key in {"groq", "groqcloud"}:
-        free_models = {
-            "openai/gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "qwen/qwen3.8-27b",
-        }
+        free_models = GROQ_ALLOWED_MODELS
         if model and model not in free_models:
             reasons.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
         # Official Groq API keys use the gsk_ prefix. This is a format-only
@@ -2298,6 +2313,7 @@ def run_independent_ai_supervisor(
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
+        request_model = str(payload.get("model") or model).strip()
         if http_status != 200:
             return {
                 "reviewer_id": "second_ai", "provider": provider, "model": model,
@@ -2349,7 +2365,7 @@ def run_independent_ai_supervisor(
             }
         if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
             return {
-                "reviewer_id": "second_ai", "provider": provider, "model": model,
+                "reviewer_id": "second_ai", "provider": provider, "model": request_model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
                 "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": False, "model_verified": False,
@@ -2368,7 +2384,7 @@ def run_independent_ai_supervisor(
                 else _validated_pattern_review(document, model, asset_name, evidence=evidence)
                 if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
                 else _validated_review(
-                    document, model, asset_name, expected_side=expected_side, market_type=market_type,
+                    document, request_model, asset_name, expected_side=expected_side, market_type=market_type,
                 )
             )
 
@@ -2385,7 +2401,7 @@ def run_independent_ai_supervisor(
             "response_id": (str(body.get("id"))[:200] if isinstance(body, dict) and body.get("id") is not None else None),
             "confidence": (parsed.get("confidence", parsed.get("confidence_score")) if isinstance(parsed, dict) and isinstance(parsed.get("confidence", parsed.get("confidence_score")), (int, float)) and not isinstance(parsed.get("confidence", parsed.get("confidence_score")), bool) else None),
             "reviewer_id": "second_ai", "provider": provider,
-            "configured_model": model, "returned_model": returned_model[:160],
+            "model": request_model, "configured_model": model, "returned_model": returned_model[:160],
             "request_attempted": True, "response_source": "LIVE_API",
             "model_verified": True, "response_validated": True,
             "http_status": http_status, "latency_ms": latency_ms,
