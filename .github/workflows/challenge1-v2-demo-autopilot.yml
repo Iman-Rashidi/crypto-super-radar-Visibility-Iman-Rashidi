@@ -17,6 +17,7 @@ on:
       - tests/test_challenge1_v2_autopilot.py
       - tests/test_telegram_notifier.py
       - tests/test_challenge1_v2_supervisor_failover.py
+      - tests/test_challenge1_v2_web_orchestration.py
   workflow_dispatch:
 
 permissions:
