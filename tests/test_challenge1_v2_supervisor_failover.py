@@ -5,7 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from crypto_super_radar.ai_supervisor import run_challenge1_v2_supervisor_reviews
+from crypto_super_radar.ai_supervisor import GROQ_ALLOWED_MODELS, run_challenge1_v2_supervisor_reviews
+from crypto_super_radar.blofin_demo_executor import GROQ_ALLOWED_MODELS as EXECUTOR_GROQ_ALLOWED_MODELS
 
 
 def valid_approval():
@@ -92,6 +93,27 @@ class Challenge1V2SingleGroqReviewerTests(unittest.TestCase):
                 result = self.invoke(review)
                 self.assertFalse(result["approved"])
                 self.assertNotEqual(result["ai_consensus"]["status"], "APPROVED_BY_GROQ")
+
+    def test_no_trade_skips_the_reviewer_and_uses_the_same_allowlist_as_executor(self):
+        no_trade = SimpleNamespace(
+            signal=SimpleNamespace(value="NO_TRADE"),
+            metrics={"execution_profile": "CHALLENGE_1_V2"},
+        )
+
+        def must_not_call(*_args, **_kwargs):
+            self.fail("NO_TRADE must not invoke a Groq reviewer")
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_challenge1_v2_supervisor_reviews(
+                no_trade, "perp:BTCUSDT", second_reviewer=must_not_call,
+            )
+        self.assertEqual(result["status"], "NO_TRADE")
+        self.assertEqual(result["ai_review"]["skip_reason_code"], "NO_DIRECTIONAL_SIGNAL")
+        self.assertFalse(result["ai_review"]["request_attempted"])
+        self.assertEqual(result["ai_consensus"]["decision"], "NO_TRADE_NO_AI_REQUEST")
+        expected = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
+        self.assertEqual(GROQ_ALLOWED_MODELS, expected)
+        self.assertEqual(GROQ_ALLOWED_MODELS, EXECUTOR_GROQ_ALLOWED_MODELS)
 
     def test_missing_or_mismatched_wave_evidence_blocks_groq_approval(self):
         review = {**valid_approval(), "elliott_wave_direction": "BEARISH"}
