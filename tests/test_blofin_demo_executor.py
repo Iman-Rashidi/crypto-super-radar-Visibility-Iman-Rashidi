@@ -921,12 +921,27 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true"}):
+            self.assertEqual(first["candle_guard_open_utc"], duplicate["candle_guard_open_utc"])
             self.assertTrue(self.store.reserve_order(
                 first, max_concurrent_positions=4, v2_autopilot=True,
             ))
+            # A completed position must not make the same 15m candle tradable
+            # again in the opposite direction.
+            self.store.update_order(first["client_order_id"], "CLOSED")
             self.assertFalse(self.store.reserve_order(
                 duplicate, max_concurrent_positions=4, v2_autopilot=True,
             ))
+
+    def test_v2_reservation_requires_closed_candle_identity(self):
+        plan = build_demo_order_plan(
+            v2_signal_record(), instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        plan.pop("candle_guard_open_utc")
+        with patch.dict(os.environ, {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true"}):
+            self.assertFalse(self.store.reserve_order(
+                plan, max_concurrent_positions=4, v2_autopilot=True,
+            ))
+        self.assertFalse(self.store.has_any_orders())
 
     def test_has_any_orders_tracks_reserved_order_history(self):
         self.assertFalse(self.store.has_any_orders())

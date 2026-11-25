@@ -486,6 +486,21 @@ def build_demo_order_plan(
             "Only the explicitly validated CHALLENGE_1 or CHALLENGE_1_V2 profiles are allowed."
         )
 
+    candle_guard = None
+    if execution_profile == "CHALLENGE_1_V2":
+        v2_evidence = record.get("challenge1_v2_evidence")
+        if not isinstance(v2_evidence, Mapping):
+            raise BloFinDemoExecutionBlocked("V2 candle identity is required for duplicate-candle protection.")
+        candle_timeframe = str(v2_evidence.get("setup_timeframe") or "").strip().lower()
+        candle_open_utc = str(v2_evidence.get("signal_candle_open_utc") or "").strip()
+        if candle_timeframe != "15m" or not candle_open_utc:
+            raise BloFinDemoExecutionBlocked("V2 setup timeframe and closed-candle timestamp are required.")
+        candle_guard = {
+            "instrument_id": inst_id.strip().upper(),
+            "timeframe": candle_timeframe,
+            "candle_open_utc": candle_open_utc,
+        }
+
     if instrument.get("instId") != inst_id or instrument.get("apiPermission") != "full":
         raise BloFinDemoExecutionBlocked("Contract is not explicitly marked apiPermission=full.")
     if instrument.get("state") != "live" or instrument.get("contractType") != "linear":
@@ -582,6 +597,9 @@ def build_demo_order_plan(
     return {
         "signal_id": signal_id,
         "execution_profile": execution_profile,
+        "candle_guard_instrument_id": candle_guard["instrument_id"] if candle_guard else None,
+        "candle_guard_timeframe": candle_guard["timeframe"] if candle_guard else None,
+        "candle_guard_open_utc": candle_guard["candle_open_utc"] if candle_guard else None,
         "client_order_id": client_order_id,
         "inst_id": inst_id,
         "side": side,
@@ -1176,6 +1194,17 @@ class BloFinDemoEventStore:
                 )
             """)
             self._db.execute("""
+                CREATE TABLE IF NOT EXISTS blofin_demo_candle_reservations (
+                    instrument_id TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    candle_open_utc TEXT NOT NULL,
+                    signal_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (instrument_id, timeframe, candle_open_utc)
+                )
+            """)
+            self._db.execute("""
                 CREATE TABLE IF NOT EXISTS challenge1_v2_position_exit_state (
                     position_id TEXT PRIMARY KEY,
                     client_order_id TEXT NOT NULL UNIQUE,
@@ -1576,6 +1605,16 @@ class BloFinDemoEventStore:
                     and str(plan.get("execution_profile") or "").strip().upper() == "CHALLENGE_1_V2"
                     and os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
                 )
+                candle_guard = None
+                if v2_controls_enabled:
+                    candle_guard = (
+                        str(plan.get("candle_guard_instrument_id") or "").strip().upper(),
+                        str(plan.get("candle_guard_timeframe") or "").strip().lower(),
+                        str(plan.get("candle_guard_open_utc") or "").strip(),
+                    )
+                    if not all(candle_guard):
+                        self._db.rollback()
+                        return False
                 lock_row = self._db.execute(
                     "SELECT max_lifetime_orders, consumed_orders FROM "
                     "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
@@ -1659,6 +1698,17 @@ class BloFinDemoEventStore:
                     self._db.rollback()
                     return False
 
+                if candle_guard is not None:
+                    self._db.execute(
+                        """INSERT OR IGNORE INTO blofin_demo_candle_reservations
+                           (instrument_id, timeframe, candle_open_utc, signal_id, client_order_id, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (*candle_guard, str(plan["signal_id"]), order_id, now),
+                    )
+                    if self._db.execute("SELECT changes()").fetchone()[0] != 1:
+                        self._db.rollback()
+                        return False
+
                 self._db.execute(
                     """INSERT INTO blofin_demo_orders
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
@@ -1689,6 +1739,11 @@ class BloFinDemoEventStore:
                     "learning_experience_id_present": bool(plan.get("experience_id")),
                     "single_shot_lock_claimed": bool(legacy_single_shot),
                     "single_shot_max_lifetime_orders": 1 if legacy_single_shot else None,
+                    "candle_guard": ({
+                        "instrument_id": candle_guard[0],
+                        "timeframe": candle_guard[1],
+                        "candle_open_utc": candle_guard[2],
+                    } if candle_guard is not None else None),
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
