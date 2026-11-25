@@ -24,7 +24,6 @@ from crypto_super_radar.challenge1_v2_autopilot import (
 from crypto_super_radar.challenge1_v2_orchestration import analyze_challenge1_v2_market
 from crypto_super_radar.telegram_notifier import TelegramNotifier
 
-LOCK_KEY = "v2-final-victory-verification-2026-11-25"
 BAR_MS = 15 * 60 * 1000
 
 
@@ -115,7 +114,19 @@ def _report_proves_no_entry(report_text: str) -> bool:
         return False
 
 
-def _claim_once(db: Any, *, safe_to_retry_no_entry: bool = False) -> bool:
+def build_candle_idempotency_key(symbol: str, completed_candle_open_ms: int) -> str:
+    """One idempotency scope per market and completed 15m candle open time."""
+    normalized = str(symbol or "").strip().upper()
+    if normalized not in SYMBOLS:
+        raise ValueError(f"Unsupported idempotency symbol: {normalized or 'EMPTY'}")
+    stamp = int(completed_candle_open_ms)
+    if stamp <= 0:
+        raise ValueError("Completed candle open timestamp must be positive")
+    candle_open_utc = datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return f"v2-managed-profit:{normalized}:{candle_open_utc}"
+
+
+def _claim_once(db: Any, lock_key: str, *, safe_to_retry_no_entry: bool = False) -> bool:
     db.execute("""CREATE TABLE IF NOT EXISTS csr_managed_demo_position_once (
         lock_key TEXT PRIMARY KEY,
         status TEXT NOT NULL,
@@ -126,12 +137,12 @@ def _claim_once(db: Any, *, safe_to_retry_no_entry: bool = False) -> bool:
     db.commit()
     row = db.execute(
         "SELECT status,report_json FROM csr_managed_demo_position_once WHERE lock_key=?",
-        (LOCK_KEY,),
+        (lock_key,),
     ).fetchone()
     if row is None:
         cursor = db.execute(
             "INSERT OR IGNORE INTO csr_managed_demo_position_once(lock_key,status,report_json) VALUES(?,?,?)",
-            (LOCK_KEY, "IN_PROGRESS", "{}"),
+            (lock_key, "IN_PROGRESS", "{}"),
         )
         db.commit()
         return int(getattr(cursor, "rowcount", 0) or 0) == 1
@@ -142,26 +153,26 @@ def _claim_once(db: Any, *, safe_to_retry_no_entry: bool = False) -> bool:
     ):
         db.execute(
             "UPDATE csr_managed_demo_position_once SET status='IN_PROGRESS',report_json='{}',updated_at=CURRENT_TIMESTAMP WHERE lock_key=?",
-            (LOCK_KEY,),
+            (lock_key,),
         )
         db.commit()
         check = db.execute(
-            "SELECT status FROM csr_managed_demo_position_once WHERE lock_key=?", (LOCK_KEY,)
+            "SELECT status FROM csr_managed_demo_position_once WHERE lock_key=?", (lock_key,)
         ).fetchone()
         return bool(check and str(check[0]) == "IN_PROGRESS")
     return False
 
 
-def _save_report(db: Any, report: dict[str, Any], status: str) -> None:
+def _save_report(db: Any, report: dict[str, Any], status: str, lock_key: str) -> None:
     encoded = json.dumps(report, ensure_ascii=False, sort_keys=True, default=str)
     db.execute(
         "UPDATE csr_managed_demo_position_once SET status=?,report_json=?,updated_at=CURRENT_TIMESTAMP WHERE lock_key=?",
-        (status, encoded, LOCK_KEY),
+        (status, encoded, lock_key),
     )
     db.commit()
     row = db.execute(
         "SELECT status,report_json FROM csr_managed_demo_position_once WHERE lock_key=?",
-        (LOCK_KEY,),
+        (lock_key,),
     ).fetchone()
     if row is None or str(row[0]) != status or str(row[1]) != encoded:
         raise RuntimeError("Turso one-shot report read-back mismatch")
@@ -204,7 +215,7 @@ def _tp1_price(entry: str, stop: str, side: str) -> str:
 
 def main() -> int:
     report: dict[str, Any] = {
-        "idempotency_key": LOCK_KEY,
+        "idempotency_key": lock_key,
         "environment": "BLOFIN_DEMO_ONLY",
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "strategy": "CHALLENGE_1_V2",
@@ -226,6 +237,7 @@ def main() -> int:
 
     db = connect_database()
     executor = None
+    lock_key: str | None = None
     try:
         client = BloFinDemoTradeClient()
         if client.base_url != DEMO_REST_URL:
@@ -242,15 +254,27 @@ def main() -> int:
         ]
         if active_positions or pending_orders:
             raise RuntimeError("Existing Demo positions or pending orders block one-shot entry")
-        if not _claim_once(db, safe_to_retry_no_entry=True):
-            print(json.dumps({"status": "DUPLICATE_SKIPPED", "idempotency_key": LOCK_KEY}))
-            return 0
-
         ranked = rank_top1_momentum(client)
         winner = ranked[0]
+        lock_key = build_candle_idempotency_key(
+            winner["symbol"], int(winner["latest_closed_candle_ms"])
+        )
+        candle_open_utc = datetime.fromtimestamp(
+            int(winner["latest_closed_candle_ms"]) / 1000, tz=timezone.utc
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        report["idempotency_key"] = lock_key
+        report["completed_candle_open_utc"] = candle_open_utc
         report["momentum_ranking"] = ranked
         report["top1"] = winner
-        _save_report(db, report, "TOP1_SELECTED")
+        if not _claim_once(db, lock_key, safe_to_retry_no_entry=True):
+            print(json.dumps({
+                "status": "DUPLICATE_SKIPPED",
+                "idempotency_key": lock_key,
+                "symbol": winner["symbol"],
+                "completed_candle_open_utc": candle_open_utc,
+            }, ensure_ascii=False))
+            return 0
+        _save_report(db, report, "TOP1_SELECTED", lock_key)
 
         def analyze_selected(exchange: Any, symbol: str) -> Mapping[str, Any]:
             if symbol != winner["symbol"]:
@@ -287,7 +311,7 @@ def main() -> int:
             }
             report["status"] = "NO_TRADE_RETRYABLE"
             report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-            _save_report(db, report, "NO_TRADE_RETRYABLE")
+            _save_report(db, report, "NO_TRADE_RETRYABLE", lock_key)
             print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), flush=True)
             return 0
         report["groq"] = _verify_groq(selected)
@@ -334,7 +358,7 @@ def main() -> int:
             "tp1_managed_target": tp1,
             "protection_readback": "SL_VERIFIED_FULL_SIZE; NO_EXCHANGE_TP",
         }
-        _save_report(db, report, "POSITION_OPEN_SL_VERIFIED")
+        _save_report(db, report, "POSITION_OPEN_SL_VERIFIED", lock_key)
 
         telegram_message = (
             f"🚀 پوزیشن آزمایشی جدید در BloFin Demo\n"
@@ -348,13 +372,13 @@ def main() -> int:
             "حفاظت SL روی صرافی بازخوانی و تأیید شد. TP1/بستن ۵۰٪، انتقال SL به سربه‌سر و Time Exit توسط مدیر V2 انجام می‌شود."
         )
         notifier = TelegramNotifier(connection_factory=connect_database)
-        telegram = notifier.send_once(LOCK_KEY + ":entry-telegram", telegram_message)
+        telegram = notifier.send_once(lock_key + ":entry-telegram", telegram_message)
         if telegram.get("status") != "SENT":
             raise RuntimeError("Telegram did not confirm SENT")
         report["telegram"] = telegram
         report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         report["status"] = "POSITION_OPEN_SL_VERIFIED_TELEGRAM_SENT"
-        _save_report(db, report, "COMPLETE")
+        _save_report(db, report, "COMPLETE", lock_key)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), flush=True)
         return 0
     except Exception as exc:
@@ -362,9 +386,10 @@ def main() -> int:
         report["failure"] = {"type": type(exc).__name__, "message": str(exc)[:400]}
         report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         try:
-            row = db.execute("SELECT COUNT(*) FROM csr_managed_demo_position_once WHERE lock_key=?", (LOCK_KEY,)).fetchone()
-            if row and int(row[0]) == 1:
-                _save_report(db, report, "FAILED_OR_UNKNOWN_NO_RETRY")
+            if lock_key:
+                row = db.execute("SELECT COUNT(*) FROM csr_managed_demo_position_once WHERE lock_key=?", (lock_key,)).fetchone()
+                if row and int(row[0]) == 1:
+                    _save_report(db, report, "FAILED_OR_UNKNOWN_NO_RETRY", lock_key)
         except Exception:
             pass
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), file=sys.stderr, flush=True)

@@ -1,7 +1,11 @@
+import sqlite3
 import unittest
 from decimal import Decimal
 
-from scripts.v2_managed_profit_demo_position import rank_top1_momentum, _tp1_price, SYMBOLS
+from scripts.v2_managed_profit_demo_position import (
+    rank_top1_momentum, _tp1_price, SYMBOLS,
+    build_candle_idempotency_key, _claim_once,
+)
 
 
 class FakeMarket:
@@ -49,6 +53,29 @@ class ManagedProfitTop1Tests(unittest.TestCase):
         client = FakeMarket(stale={"LINK-USDT"})
         with self.assertRaisesRegex(RuntimeError, "ticker is stale"):
             rank_top1_momentum(client, now_ms=client.now)
+
+    def test_idempotency_key_is_scoped_to_symbol_and_completed_candle(self):
+        candle_open = 1_800_000_000_000
+        first = build_candle_idempotency_key("SOL-USDT", candle_open)
+        same = build_candle_idempotency_key("sol-usdt", candle_open)
+        next_candle = build_candle_idempotency_key("SOL-USDT", candle_open + 900_000)
+        other_symbol = build_candle_idempotency_key("BTC-USDT", candle_open)
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, next_candle)
+        self.assertNotEqual(first, other_symbol)
+        self.assertIn("SOL-USDT", first)
+        self.assertIn("2027-01-15T08:00:00Z", first)
+
+    def test_claim_once_blocks_only_same_symbol_and_candle_key(self):
+        db = sqlite3.connect(":memory:")
+        try:
+            key_a = build_candle_idempotency_key("SOL-USDT", 1_800_000_000_000)
+            key_b = build_candle_idempotency_key("SOL-USDT", 1_800_000_900_000)
+            self.assertTrue(_claim_once(db, key_a))
+            self.assertFalse(_claim_once(db, key_a))
+            self.assertTrue(_claim_once(db, key_b))
+        finally:
+            db.close()
 
     def test_tp1_target_uses_existing_v2_1_2r_rule(self):
         self.assertEqual(_tp1_price("100", "98", "LONG"), "102.4")

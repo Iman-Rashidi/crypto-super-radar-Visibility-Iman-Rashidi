@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   managed-demo-position:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip-v2-demo]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
