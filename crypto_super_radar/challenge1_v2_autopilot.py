@@ -225,7 +225,7 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
             except (IndexError,TypeError,ValueError):
                 continue
         state["candles_elapsed"]=max(int(state.get("candles_elapsed") or 0),len(closed))
-        if state["candles_elapsed"]>=12 and not state.get("tp1_executed",False):
+        if state["candles_elapsed"]>=12:
             if state.get("status")=="TIME_EXIT_PENDING":
                 results.append({"position_id":pid,"status":"TIME_EXIT_ALREADY_PENDING"})
                 continue
