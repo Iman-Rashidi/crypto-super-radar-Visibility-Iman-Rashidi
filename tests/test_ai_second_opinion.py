@@ -1573,6 +1573,80 @@ class V2WaveNormalizationRegressionTests(unittest.TestCase):
             evidence={"elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"}},
         )
 
+
+    def test_v2_input_preserves_safe_numeric_wave_pivots_and_regime_proof(self):
+        from crypto_super_radar.ai_second_opinion import _build_v2_review_input
+        wave = {
+            "status": "CANDIDATE",
+            "pattern": "BULLISH",
+            "phase": "WAVES_1_AND_2_CONFIRMED",
+            "confirmed_pivot_count": 3,
+            "pivot_reversal_threshold_pct": 0.4,
+            "wave_alignment": "ALIGNED",
+            "timeframe": "1H",
+            "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+            "expected_signal_direction": "LONG",
+            "latest_closed_candle_open_utc": "2026-11-25T16:00:00+00:00",
+            "data_asof_utc": "2026-11-25T17:00:00+00:00",
+            "reason": "untrusted free-form text must not pass",
+            "pivots": [
+                {"index": 10, "kind": "LOW", "price": 100.0,
+                 "timestamp": "2026-11-25T10:00:00+00:00",
+                 "confirmed_at": "2026-11-25T11:00:00+00:00"},
+                {"index": 20, "kind": "HIGH", "price": 110.0,
+                 "timestamp": "2026-11-25T12:00:00+00:00",
+                 "confirmed_at": "2026-11-25T13:00:00+00:00"},
+                {"index": 30, "kind": "LOW", "price": 104.0,
+                 "timestamp": "2026-11-25T14:00:00+00:00",
+                 "confirmed_at": "2026-11-25T15:00:00+00:00"},
+            ],
+        }
+        record = {
+            "signal": "LONG",
+            "execution_profile": "CHALLENGE_1_V2",
+            "entry": 105.0, "stop_loss": 100.0, "take_profit": 115.0,
+            "gross_rr": 2.0, "confidence_score": 90,
+            "regime": {
+                "status": "TREND", "direction": "LONG", "adx_1h": 34.1,
+                "aligned_4h": True, "ema21_1h": 104.0, "ema55_1h": 102.0,
+                "ema200_1h": 99.0, "untrusted_note": "do not pass",
+            },
+            "market_data_proof": {
+                "asof_utc": "2026-11-25T17:00:00+00:00",
+                "common_asof": True, "contract_specs_verified": True,
+                "source": "BLOFIN_DEMO_REST",
+                "timeframes": {
+                    "1H": {"rows": 299, "latest_open_utc": "2026-11-25T16:00:00+00:00"},
+                    "4H": {"rows": 299, "latest_open_utc": "2026-11-25T12:00:00+00:00"},
+                    "15m": {"rows": 299, "latest_open_utc": "2026-11-25T16:45:00+00:00"},
+                },
+            },
+            "challenge1_v2_evidence": {
+                "decision_engine_version": "CHALLENGE_1_V2_1H_ADX_EMA21_15M_EXECUTION",
+                "signal_id": "challenge1-v2:BTC-USDT:15m:2026-11-25T16:45:00+00:00:LONG",
+                "instrument_id": "BTC-USDT", "setup_timeframe": "1H",
+                "entry_execution_timeframe": "15m", "context_timeframes": ["1H", "4H"],
+                "higher_timeframes_used": True, "completed_candles_only": True,
+                "signal_candle_open_utc": "2026-11-25T16:45:00+00:00",
+                "context_1h_candle_open_utc": "2026-11-25T16:00:00+00:00",
+                "context_4h_candle_open_utc": "2026-11-25T12:00:00+00:00",
+                "data_asof_utc": "2026-11-25T17:00:00+00:00",
+                "funding_rate": 0.00003, "funding_kind": "0",
+                "funding_event_time_ms": 1795622400000, "funding_max_age_ms": 32400000,
+                "elliott_wave": wave, "wave_alignment": "ALIGNED",
+                "untrusted_extra": "must not pass",
+            },
+        }
+        payload = _build_v2_review_input(record, "perp:BTCUSDT", {})
+        self.assertEqual(payload["elliott_wave"]["phase"], "WAVES_1_AND_2_CONFIRMED")
+        self.assertEqual(len(payload["elliott_wave"]["pivots"]), 3)
+        self.assertEqual(payload["elliott_wave"]["pivots"][1]["kind"], "HIGH")
+        self.assertEqual(payload["regime"]["adx_1h"], 34.1)
+        self.assertTrue(payload["regime"]["aligned_4h"])
+        self.assertEqual(payload["market_data_proof"]["timeframes"]["1H"]["rows"], 299)
+        self.assertNotIn("reason", payload["elliott_wave"])
+        self.assertNotIn("untrusted_extra", payload["v2_evidence"])
+
     def test_normalizes_phase_direction_and_side_synonyms(self):
         from crypto_super_radar.ai_second_opinion import (
             _normalize_v2_phase, _normalize_v2_direction, _normalize_v2_side,
