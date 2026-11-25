@@ -581,7 +581,7 @@ def ai_supervisor_status() -> dict[str, Any]:
     ready = count >= MIN_INDEPENDENT_APPROVALS
     return {
         "provider": "Independent Multi-Provider AI Supervisor",
-        "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+        "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 20B",
         "status": "READY" if ready else "INSUFFICIENT_PROVIDERS",
         "status_fa": (
             f"{count} ارائه‌دهنده تنظیم شده؛ حداقل دو مدل مستقل برای این مسیر اختیاری لازم است."
@@ -837,7 +837,7 @@ def run_ai_supervisor(result: Any, asset: Any = None, *,
     if expected_side not in {"LONG", "SHORT"}:
         return {
             "provider": "Independent Multi-Provider AI Supervisor",
-            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 20B",
             "status": "VETO",
             "status_fa": "سیگنال جهت‌دار معتبر برای بازبینی ورود وجود ندارد.",
             "paper_entry_eligible": False,
@@ -850,7 +850,7 @@ def run_ai_supervisor(result: Any, asset: Any = None, *,
     if native_review.get("status") != "APPROVED":
         return {
             "provider": "Independent Multi-Provider AI Supervisor",
-            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 20B",
             "status": "VETO" if native_review.get("status") == "VETO" else "UNKNOWN",
             "status_fa": "شورای شواهد بومی رادار تأیید کامل نداده است؛ مدل‌های خارجی فراخوانی نشدند.",
             "native_council": native_review,
@@ -864,7 +864,7 @@ def run_ai_supervisor(result: Any, asset: Any = None, *,
     if not isinstance(evidence, dict):
         return {
             "provider": "Independent Multi-Provider AI Supervisor",
-            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 20B",
             "status": "UNKNOWN",
             "status_fa": "ساخت شواهد پاک‌سازی‌شده برای ناظر ناموفق بود.",
             "paper_entry_eligible": False,

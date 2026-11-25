@@ -2388,7 +2388,7 @@ def second_ai_connection_status() -> dict[str, Any]:
     )).strip()
     provider_key = provider.casefold().replace("-", "").replace("_", "").replace(" ", "")
     # Groq V2 always starts with the approved 20B primary; legacy env overrides
-    # cannot silently route requests to an unapproved 120B model.
+    # cannot silently route requests to an unapproved Groq model.
     model = (
         GROQ_DEFAULT_MODEL
         if provider_key in {"groq", "groqcloud"}
