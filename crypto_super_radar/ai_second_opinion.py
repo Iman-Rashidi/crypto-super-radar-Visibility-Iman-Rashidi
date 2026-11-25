@@ -889,6 +889,117 @@ def _validated_pattern_review(
     }
 
 
+def _public_v2_scalar_fields(value: Any, allowed: set[str]) -> dict[str, Any]:
+    """Serialize a fixed V2 evidence allowlist; never pass arbitrary model-facing keys."""
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    for key in allowed:
+        item = value.get(key)
+        if isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, (int, float)):
+            number = _safe_float(item)
+            if number is not None:
+                result[key] = number
+        elif isinstance(item, str):
+            normalized = item.strip()
+            if normalized and len(normalized) <= 160 and re.fullmatch(r"[A-Za-z0-9_:.+/%-]+", normalized):
+                result[key] = normalized
+    return result
+
+
+def _public_v2_wave_evidence(value: Any) -> dict[str, Any]:
+    """Keep the deterministic Elliott labels and bounded confirmed pivot facts."""
+    allowed = {
+        "status", "pattern", "phase", "direction", "confirmed_pivot_count",
+        "pivot_reversal_threshold_pct", "wave_count", "next_wave",
+        "invalidation_price", "timeframe", "evidence_source",
+        "expected_signal_direction", "latest_closed_candle_open_utc",
+        "data_asof_utc", "wave_alignment",
+    }
+    result = _public_v2_scalar_fields(value, allowed)
+    raw_pivots = value.get("pivots") if isinstance(value, Mapping) else None
+    pivots: list[dict[str, Any]] = []
+    if isinstance(raw_pivots, list):
+        for raw in raw_pivots[-6:]:
+            if not isinstance(raw, Mapping):
+                continue
+            kind = str(raw.get("kind") or "").strip().upper()
+            price = _safe_float(raw.get("price"))
+            try:
+                index = int(raw.get("index"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            timestamp = raw.get("timestamp")
+            confirmed_at = raw.get("confirmed_at")
+            if (
+                kind not in {"LOW", "HIGH"} or price is None or price <= 0
+                or index < 0
+                or not isinstance(timestamp, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T[^\s]{1,40}", timestamp)
+                or not isinstance(confirmed_at, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T[^\s]{1,40}", confirmed_at)
+            ):
+                continue
+            pivots.append({
+                "index": index, "kind": kind, "price": price,
+                "timestamp": timestamp, "confirmed_at": confirmed_at,
+            })
+    if pivots:
+        result["pivots"] = pivots
+    return result
+
+
+def _public_v2_evidence(value: Any) -> dict[str, Any]:
+    allowed = {
+        "decision_engine_version", "signal_id", "instrument_id", "setup_timeframe",
+        "entry_execution_timeframe", "higher_timeframes_used", "completed_candles_only",
+        "signal_candle_open_utc", "context_1h_candle_open_utc",
+        "context_4h_candle_open_utc", "context_15m_candle_open_utc",
+        "data_asof_utc", "funding_rate", "funding_kind", "funding_event_time_ms",
+        "funding_max_age_ms", "wave_alignment", "setup_timeframe",
+    }
+    result = _public_v2_scalar_fields(value, allowed)
+    if isinstance(value, Mapping):
+        timeframes = value.get("context_timeframes")
+        if isinstance(timeframes, list):
+            allowed_timeframes = {"5m", "15m", "1H", "4H"}
+            clean = [str(x) for x in timeframes if str(x) in allowed_timeframes]
+            if clean:
+                result["context_timeframes"] = clean[:4]
+        result["elliott_wave"] = _public_v2_wave_evidence(value.get("elliott_wave"))
+    return result
+
+
+def _public_v2_market_proof(value: Any) -> dict[str, Any]:
+    allowed = {
+        "asof_utc", "common_asof", "contract_specs_verified",
+        "entry_execution_timeframe", "signal_timeframe", "signal_rule",
+        "source", "funding_classification",
+    }
+    result = _public_v2_scalar_fields(value, allowed)
+    if isinstance(value, Mapping):
+        funding = _public_v2_scalar_fields(
+            value.get("funding"),
+            {"funding_age_ms", "funding_event_time_ms", "funding_max_age_ms",
+             "funding_rate", "funding_kind", "funding_classification"},
+        )
+        if funding:
+            result["funding"] = funding
+        raw_timeframes = value.get("timeframes")
+        if isinstance(raw_timeframes, Mapping):
+            clean_timeframes = {}
+            for timeframe in ("15m", "1H", "4H"):
+                item = raw_timeframes.get(timeframe)
+                clean = _public_v2_scalar_fields(
+                    item, {"rows", "latest_open_utc", "selected", "source"},
+                )
+                if clean:
+                    clean_timeframes[timeframe] = clean
+            if clean_timeframes:
+                result["timeframes"] = clean_timeframes
+    return result
+
+
 def _build_v2_review_input(result: Any, asset: Any, metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Expose only validated V2 multi-timeframe, funding and risk evidence to reviewers."""
     record = _challenge1_result_record(result)
@@ -910,16 +1021,22 @@ def _build_v2_review_input(result: Any, asset: Any, metrics: Mapping[str, Any]) 
         "take_profit": _safe_float(record.get("take_profit")),
         "confidence_score": _safe_float(record.get("confidence_score")),
         "gross_reward_risk": _safe_float(record.get("gross_rr")),
-        "regime": _public_evidence(record.get("regime") or {}),
-        "v2_evidence": _public_evidence(evidence),
-        "market_data_proof": _public_evidence(market_proof),
+        "regime": _public_v2_scalar_fields(
+            record.get("regime") or {},
+            {"status", "direction", "adx_1h", "aligned_4h", "neutral_4h", "opposed_4h",
+             "candle_open_utc", "candle_open_utc_4h", "close_1h", "ema21_1h",
+             "ema55_1h", "ema200_1h", "ema21_slope_1h", "ema55_slope_1h",
+             "structure_aligned_1h"},
+        ),
+        "v2_evidence": _public_v2_evidence(evidence),
+        "market_data_proof": _public_v2_market_proof(market_proof),
         "funding": {
             "rate": _safe_float(record.get("funding_rate")),
             "kind": record.get("funding_kind"),
             "event_time_ms": record.get("funding_event_time_ms"),
             "max_age_ms": record.get("funding_max_age_ms"),
         },
-        "elliott_wave": _public_evidence(wave),
+        "elliott_wave": _public_v2_wave_evidence(wave),
         "policy": {
             "completed_candles_only": True,
             "common_asof_required": True,
@@ -987,8 +1104,8 @@ def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     direction = str(wave.get("pattern") or "UNKNOWN")
     system = (
         "You are an independent technical and risk supervisor for a BloFin Demo V2 research system. "
-        "This is CHALLENGE_1_V2, not the legacy 5m strategy. Use only the supplied completed 1H, 4H and 15m candles, "
-        "one common UTC as-of timestamp, exact funding evidence and the confirmed 1H Elliott evidence. "
+        "This is CHALLENGE_1_V2, not the legacy 5m strategy. Use only the supplied closed-candle proof, "
+        "1H/4H regime metrics, 15m execution metrics, exact funding evidence and confirmed numeric 1H Elliott pivots. "
         "Never ask for or infer 5m data, never fall back to the legacy path, and do not invent missing candles, "
         "funding events, account facts, prices or wave pivots. The latest funding event must be regular fundingKind=0. "
         "Any missing/stale timeframe, missing 4H alignment, invalid funding proof, unconfirmed/contradictory wave, "
