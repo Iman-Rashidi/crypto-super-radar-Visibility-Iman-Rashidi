@@ -1491,6 +1491,8 @@ def _validated_v2_review(
     wave_verdict = str(wave_review.get("verdict") or "").strip().upper().replace(" ", "_")
     supplied_phase = _normalize_v2_phase(wave_review.get("phase"))
     supplied_direction = _normalize_v2_direction(wave_review.get("direction"))
+    phase_was_echoed = bool(supplied_phase)
+    direction_was_echoed = bool(supplied_direction)
     # A model may omit the repeated labels after explicitly supporting the
     # Elliott analyst. Fill only those missing labels from deterministic input
     # evidence, and only after the remaining specialist schema is APPROVED.
@@ -1520,7 +1522,11 @@ def _validated_v2_review(
         "elliott_wave_phase": expected_phase,
         "elliott_wave_direction": expected_direction,
         "expected_side": expected_side,
-        "wave_echo_source": "MODEL_AND_INPUT_EVIDENCE" if supplied_phase and supplied_direction else "INPUT_EVIDENCE",
+        "wave_echo_source": (
+            "MODEL_ECHO" if phase_was_echoed and direction_was_echoed
+            else "PARTIAL_MODEL_ECHO_WITH_INPUT_EVIDENCE" if phase_was_echoed or direction_was_echoed
+            else "INPUT_EVIDENCE_FALLBACK"
+        ),
         "execution_profile": "CHALLENGE_1_V2",
     })
     return result
@@ -1847,7 +1853,11 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
         view = specialists.get(key)
         if not isinstance(view, dict):
             raise ValueError("Invalid specialist view")
-        raw_view = str(view.get("view") or view.get("proposal") or view.get("verdict") or "").upper()
+        raw_view = (
+            _normalize_v2_side(view.get("view") or view.get("proposal") or view.get("verdict"))
+            if key == "trader"
+            else str(view.get("view") or view.get("proposal") or view.get("verdict") or "").strip().upper()
+        )
         if raw_view not in allowed_views[key]:
             raise ValueError("Invalid specialist verdict")
         reason = view.get("reason_fa")
