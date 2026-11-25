@@ -2118,8 +2118,8 @@ def run_free_ai_second_opinion(
 def second_ai_connection_status() -> dict[str, Any]:
     """Expose only non-secret configuration facts for an independent free-tier reviewer."""
     # The Staging runtime already stores the independent Groq credential as
-    # GROQ_API_KEY. Accept it directly and supply only the approved free-plan
-    # Groq defaults; explicit CSR_SECOND_AI_* settings still take precedence.
+    # GROQ_API_KEY. Accept it directly; provider credentials and endpoint may
+    # be configured explicitly, but the Groq model is pinned to the V2 primary.
     groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
     key = (os.getenv("CSR_SECOND_AI_API_KEY") or groq_key).strip()
     provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or (
