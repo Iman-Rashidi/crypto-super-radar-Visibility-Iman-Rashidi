@@ -24,7 +24,7 @@ from crypto_super_radar.challenge1_v2_autopilot import (
 from crypto_super_radar.challenge1_v2_orchestration import analyze_challenge1_v2_market
 from crypto_super_radar.telegram_notifier import TelegramNotifier
 
-LOCK_KEY = "v2-managed-profit-demo-position-2026-11-25"
+LOCK_KEY = "v2-final-victory-verification-2026-11-25"
 BAR_MS = 15 * 60 * 1000
 
 
