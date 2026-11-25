@@ -36,14 +36,10 @@ class WatchlistLedgerTests(unittest.TestCase):
                 return self.payload
 
         client = Mock()
-        updates = {"ok": True, "result": [{
-            "update_id": 1,
-            "message": {
-                "from": {"id": 77, "username": "Germany004"},
-                "chat": {"id": 77, "type": "private"}
-            }
-        }]}
-        client.post.side_effect = [Response(updates)] + [
+        verified_chat = {"ok": True, "result": {
+            "id": 77, "username": "Germany004", "type": "private"
+        }}
+        client.post.side_effect = [Response(verified_chat)] + [
             Response({"ok": True, "result": {"message_id": index}})
             for index in range(send_responses)
         ]
@@ -110,7 +106,7 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertIn("+25%", messages[0])
         self.assertIn("+50%", messages[1])
         self.assertIn("+100%", messages[2])
-        self.assertEqual(client.post.call_args_list[0].kwargs["json"], {"limit": 100, "timeout": 0})
+        self.assertEqual(client.post.call_args_list[0].kwargs["json"], {"chat_id": 77})
         self.assertEqual(client.post.call_args_list[1].kwargs["json"]["chat_id"], 77)
         self.assertTrue(all("€200.00" in message and "+€100.00" in message for message in messages))
         self.assertTrue(all("گزارش سود واچ‌لیست رادار" in message for message in messages))
@@ -138,11 +134,9 @@ class WatchlistLedgerTests(unittest.TestCase):
         class Response:
             def raise_for_status(self): return None
             def json(self):
-                return {"ok": True, "result": [{
-                    "update_id": 1,
-                    "message": {"from": {"id": 77, "username": "Germany004"},
-                                "chat": {"id": 77, "type": "private"}}
-                }]}
+                return {"ok": True, "result": {
+                    "id": 77, "username": "Germany004", "type": "private"
+                }}
         failed.post.side_effect = [Response(), RuntimeError("temporary Telegram failure")]
         result = send_watchlist_profit_alerts(
             self.db, session=failed, bot_token="bot-token", chat_id="12345"
