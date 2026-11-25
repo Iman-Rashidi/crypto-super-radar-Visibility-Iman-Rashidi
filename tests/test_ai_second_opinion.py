@@ -705,6 +705,45 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(result["skip_reason_code"], "OPENROUTER_KEY_MISSING")
         self.assertEqual(result["response_source"], "NONE")
 
+    def test_groq_primary_model_ignores_legacy_120b_override(self):
+        env = {
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])
+        self.assertEqual(status["model"], "openai/gpt-oss-20b")
+
+    def test_groq_primary_timeout_falls_back_to_qwen_in_same_cycle(self):
+        import requests
+        calls = []
+        fallback_model = "qwen/qwen3.8-27b"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append(dict(json))
+            if len(calls) == 1:
+                raise requests.Timeout("primary timed out")
+            return FakeResponse(document=valid_document(), model=fallback_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-openrouter-key",
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+
+        self.assertEqual([call["model"] for call in calls], [
+            "openai/gpt-oss-20b", fallback_model,
+        ])
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertEqual(review["model"], fallback_model)
+        self.assertEqual(review["returned_model"], fallback_model)
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["response_validated"])
+
     def test_second_supervisor_is_not_configured_without_its_own_credentials(self):
         with patch.dict(os.environ, {
             "OPENROUTER_API_KEY": "primary-key",
@@ -801,7 +840,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             calls.append(dict(json))
-            if len(calls) <= 2:
+            if len(calls) == 1:
                 return FakeResponse(status_code=429)
             return FakeResponse(document=valid_document(), model=fallback_model)
 
@@ -817,7 +856,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
 
         self.assertEqual([call["model"] for call in calls], [
-            "openai/gpt-oss-20b", "openai/gpt-oss-20b", fallback_model,
+            "openai/gpt-oss-20b", fallback_model,
         ])
         self.assertEqual(review["status"], "APPROVED")
         self.assertEqual(review["model"], fallback_model)
@@ -1450,43 +1489,66 @@ class GroqRateLimitPacingTests(unittest.TestCase):
         with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
             result = _post_groq_with_rate_limit(
                 post, "https://api.groq.com/openai/v1/chat/completions",
-                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+                headers={}, payload={"model": "openai/gpt-oss-20b"},
+                timeout=(8, 35), allow_redirects=False,
             )
         self.assertIs(result, response)
         self.assertEqual(len(calls), 1)
         self.assertAlmostEqual(sleep.call_args.args[0], 2.5, places=1)
 
-    def test_retries_http_429_once_after_three_seconds(self):
+    def test_http_429_falls_back_immediately_to_qwen(self):
         responses = [SimpleNamespace(status_code=429), SimpleNamespace(status_code=200)]
         calls = []
 
         def post(*args, **kwargs):
-            calls.append((args, kwargs))
+            calls.append(kwargs["json"]["model"])
             return responses.pop(0)
 
-        with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
+        payload = {"model": "openai/gpt-oss-20b"}
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep"):
             result = _post_groq_with_rate_limit(
                 post, "https://api.groq.com/openai/v1/chat/completions",
-                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+                headers={}, payload=payload, timeout=(8, 35), allow_redirects=False,
             )
         self.assertEqual(result.status_code, 200)
-        self.assertEqual(len(calls), 2)
-        self.assertIn(unittest.mock.call(3.0), sleep.call_args_list)
+        self.assertEqual(calls, ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+        self.assertEqual(payload["model"], "qwen/qwen3.8-27b")
 
-    def test_does_not_retry_a_second_http_429(self):
-        response = SimpleNamespace(status_code=429)
+    def test_primary_timeout_falls_back_immediately_to_qwen(self):
+        import requests
         calls = []
 
         def post(*args, **kwargs):
-            calls.append((args, kwargs))
-            return response
+            calls.append(kwargs["json"]["model"])
+            if len(calls) == 1:
+                raise requests.Timeout("timeout")
+            return SimpleNamespace(status_code=200)
 
-        with patch("crypto_super_radar.ai_second_opinion.time.sleep") as sleep:
+        payload = {"model": "openai/gpt-oss-20b"}
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep"):
             result = _post_groq_with_rate_limit(
                 post, "https://api.groq.com/openai/v1/chat/completions",
-                headers={}, payload={}, timeout=(8, 35), allow_redirects=False,
+                headers={}, payload=payload, timeout=(8, 35), allow_redirects=False,
             )
-        self.assertIs(result, response)
-        self.assertEqual(len(calls), 2)
-        self.assertIn(unittest.mock.call(3.0), sleep.call_args_list)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(calls, ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
 
+    def test_fallback_429_is_not_retried_or_chained(self):
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append(kwargs["json"]["model"])
+            return SimpleNamespace(status_code=429)
+
+        payload = {"model": "openai/gpt-oss-20b"}
+        with patch("crypto_super_radar.ai_second_opinion.time.sleep"):
+            result = _post_groq_with_rate_limit(
+                post, "https://api.groq.com/openai/v1/chat/completions",
+                headers={}, payload=payload, timeout=(8, 35), allow_redirects=False,
+            )
+        self.assertEqual(result.status_code, 429)
+        self.assertEqual(calls, ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+
+
+if __name__ == "__main__":
+    unittest.main()
