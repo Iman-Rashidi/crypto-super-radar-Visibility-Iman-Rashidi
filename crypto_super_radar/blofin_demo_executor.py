@@ -2687,6 +2687,126 @@ class BloFinDemoExecutor:
             return []
         return [row for row in value if isinstance(row, Mapping)]
 
+    def _emergency_close_unprotected_filled_position(
+        self, *, inst_id: str, side: str, client_order_id: str,
+        filled_size: Any, stop_loss: Any, position_id: str | None,
+    ) -> None:
+        """Fail closed: close a confirmed fill if its full-size active SL cannot be verified."""
+        expected_size = _decimal(filled_size, "filled_size")
+        expected_stop = _decimal(stop_loss, "stop_loss")
+        if expected_size <= 0 or side not in {"LONG", "SHORT"}:
+            raise BloFinDemoExecutionUnknown("Unprotected fill identity is incomplete; manual review required.")
+        positions = self._response_rows(self.client.get_positions(inst_id=inst_id))
+        candidates = []
+        for row in positions:
+            if str(row.get("instId") or "").upper() != inst_id.upper():
+                continue
+            if str(row.get("marginMode") or "").lower() != "isolated":
+                continue
+            if str(row.get("positionSide") or "").lower() != "net":
+                continue
+            returned_id = str(row.get("positionId") or "").strip()
+            if position_id and returned_id != str(position_id).strip():
+                continue
+            signed = _decimal(row.get("positions"), "position_size")
+            if (side == "LONG" and signed <= 0) or (side == "SHORT" and signed >= 0):
+                continue
+            if abs(signed) != expected_size:
+                continue
+            candidates.append((row, returned_id, signed))
+        if len(candidates) > 1:
+            self.store.update_order(
+                client_order_id, "CRITICAL_UNPROTECTED",
+                critical_reason="Multiple exchange positions match an unprotected filled entry; manual review required.",
+            )
+            raise BloFinDemoExecutionUnknown("Multiple matching Demo positions; refusing an ambiguous close.")
+        exact_pid = str(position_id or "").strip()
+        close_response = None
+        close_error = None
+        if candidates:
+            position, exact_pid, signed_size = candidates[0]
+            close_id = "R" + hashlib.sha256(
+                f"{client_order_id}|{exact_pid}|unprotected-close".encode()
+            ).hexdigest()[:24]
+            try:
+                close_response = self.client.close_futures_position(
+                    inst_id=inst_id, margin_mode="isolated", position_side="net",
+                    client_order_id=close_id, position_id=exact_pid,
+                )
+            except Exception as exc:
+                close_error = type(exc).__name__
+        else:
+            signed_size = Decimal("0")
+            close_id = None
+        flat = False
+        for _ in range(5):
+            current = self._response_rows(self.client.get_positions(inst_id=inst_id))
+            flat = not any(
+                str(row.get("instId") or "").upper() == inst_id.upper()
+                and (not exact_pid or str(row.get("positionId") or "").strip() == exact_pid)
+                and _decimal(row.get("positions") or "0", "position_size") != 0
+                for row in current
+            )
+            if flat:
+                break
+            time.sleep(1)
+        if not flat:
+            self.store.update_order(
+                client_order_id, "CRITICAL_UNPROTECTED",
+                position_id=exact_pid or None, filled_size=_format_decimal(expected_size),
+                critical_reason=f"Emergency close could not be verified flat ({close_error or 'position still open'}).",
+            )
+            raise BloFinDemoExecutionUnknown(
+                "Filled Demo position remains open after emergency close attempt; new entries are blocked."
+            )
+        close_side = "sell" if side == "LONG" else "buy"
+        def matching_orphan_rows() -> list[Mapping[str, Any]]:
+            matches = []
+            for row in self._response_rows(self.client.get_open_tpsl_orders(inst_id=inst_id, limit=100)):
+                if (
+                    str(row.get("instId") or "").upper() != inst_id.upper()
+                    or str(row.get("marginMode") or "").lower() != "isolated"
+                    or str(row.get("positionSide") or "").lower() != "net"
+                    or str(row.get("side") or "").lower() != close_side
+                    or str(row.get("state") or "").lower() != "live"
+                    or str(row.get("slTriggerPriceType") or "").lower() != "mark"
+                ):
+                    continue
+                try:
+                    if _decimal(row.get("slTriggerPrice"), "sl_trigger") != expected_stop:
+                        continue
+                    sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+                    if sizes and all(_decimal(v, "sl_size") == expected_size for v in sizes):
+                        matches.append(row)
+                except Exception:
+                    continue
+            return matches
+        try:
+            for row in matching_orphan_rows():
+                tpsl_id = str(row.get("tpslId") or "").strip()
+                if tpsl_id:
+                    self.client.cancel_tpsl_order(inst_id=inst_id, tpsl_id=tpsl_id)
+            if matching_orphan_rows():
+                raise BloFinDemoExecutionUnknown("Orphaned TPSL order remains active after emergency close.")
+        except Exception as exc:
+            self.store.update_order(
+                client_order_id, "CRITICAL_UNPROTECTED",
+                position_id=exact_pid or None, filled_size=_format_decimal(expected_size),
+                critical_reason=f"Position is flat but orphan TPSL cleanup failed ({type(exc).__name__}).",
+            )
+            raise BloFinDemoExecutionUnknown(
+                "Demo position is flat, but a matching orphan TPSL trigger could not be cleared."
+            ) from exc
+        self.store.update_order(
+            client_order_id, "CLOSED", position_id=exact_pid or None,
+            filled_size=_format_decimal(expected_size),
+            critical_reason="Unprotected filled position emergency-closed and flat verified; matching orphan TPSL cleared.",
+        )
+        raise BloFinDemoExecutionBlocked(
+            "Filled entry had no verifiable full-size active SL; emergency close and flat verification succeeded. "
+            "No further entry is permitted in this one-shot cycle."
+        )
+
     @staticmethod
     def _same_decimal(left: Any, right: Any, field: str) -> bool:
         try:
@@ -3210,6 +3330,15 @@ class BloFinDemoExecutor:
         if reconciliation["status"] == "PENDING_RECONCILE":
             raise BloFinDemoExecutionUnknown(
                 "Post-submit exchange state is not conclusive; journal remains PENDING_RECONCILE."
+            )
+        if reconciliation["status"] == "CRITICAL_UNPROTECTED":
+            self._emergency_close_unprotected_filled_position(
+                inst_id=inst_id,
+                side=plan["side"],
+                client_order_id=plan["client_order_id"],
+                filled_size=reconciliation.get("filled_size"),
+                stop_loss=plan["stop_loss"],
+                position_id=reconciliation.get("position_id"),
             )
         return {
             **reconciliation,

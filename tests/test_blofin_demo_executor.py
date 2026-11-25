@@ -2591,3 +2591,69 @@ class Challenge1V2DemoAdapterContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BloFinDemoEmergencyCloseTests(unittest.TestCase):
+    def _executor(self, *, close_position=True, tpsl_rows=None):
+        class Store:
+            def __init__(self):
+                self.updates = []
+            def update_order(self, client_order_id, status, **kwargs):
+                self.updates.append((client_order_id, status, kwargs))
+        class Client:
+            def __init__(self):
+                self.positions = [{
+                    "instId": "BTC-USDT", "positionId": "pos-1",
+                    "marginMode": "isolated", "positionSide": "net", "positions": "2",
+                }]
+                self.tpsl_rows = list(tpsl_rows or [])
+                self.close_calls = []
+                self.cancelled = []
+            def get_positions(self, *, inst_id=None):
+                return [p for p in self.positions if p["instId"] == inst_id]
+            def close_futures_position(self, **kwargs):
+                self.close_calls.append(kwargs)
+                if close_position:
+                    self.positions = []
+                return {"code": "0", "data": {"orderId": "close-1"}}
+            def get_open_tpsl_orders(self, *, inst_id=None, limit=100):
+                return [r for r in self.tpsl_rows if r["instId"] == inst_id]
+            def cancel_tpsl_order(self, *, inst_id, tpsl_id):
+                self.cancelled.append(tpsl_id)
+                self.tpsl_rows = [r for r in self.tpsl_rows if r.get("tpslId") != tpsl_id]
+                return {"code": "0", "data": [{"code": "0", "tpslId": tpsl_id}]}
+        store, client = Store(), Client()
+        executor = BloFinDemoExecutor(
+            client=client, store=store, policy=BloFinDemoRiskPolicy(), trading_enabled=True
+        )
+        return executor, client, store
+
+    def test_unprotected_fill_is_closed_and_orphan_sl_is_canceled(self):
+        tpsl = [{
+            "tpslId": "tpsl-1", "instId": "BTC-USDT",
+            "marginMode": "isolated", "positionSide": "net", "side": "sell",
+            "state": "live", "size": "2", "actualSize": None,
+            "slTriggerPrice": "98", "slTriggerPriceType": "mark",
+        }]
+        executor, client, store = self._executor(tpsl_rows=tpsl)
+        with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "emergency close and flat verification succeeded"):
+            executor._emergency_close_unprotected_filled_position(
+                inst_id="BTC-USDT", side="LONG", client_order_id="entry-1",
+                filled_size="2", stop_loss="98", position_id="pos-1",
+            )
+        self.assertEqual(len(client.close_calls), 1)
+        self.assertEqual(client.close_calls[0]["position_id"], "pos-1")
+        self.assertEqual(client.cancelled, ["tpsl-1"])
+        self.assertEqual(client.positions, [])
+        self.assertEqual(store.updates[-1][1], "CLOSED")
+
+    def test_unprotected_fill_that_cannot_be_flattened_remains_critical(self):
+        executor, client, store = self._executor(close_position=False)
+        with patch("crypto_super_radar.blofin_demo_executor.time.sleep"):
+            with self.assertRaisesRegex(BloFinDemoExecutionUnknown, "remains open"):
+                executor._emergency_close_unprotected_filled_position(
+                    inst_id="BTC-USDT", side="LONG", client_order_id="entry-1",
+                    filled_size="2", stop_loss="98", position_id="pos-1",
+                )
+        self.assertEqual(store.updates[-1][1], "CRITICAL_UNPROTECTED")
+        self.assertEqual(len(client.close_calls), 1)
