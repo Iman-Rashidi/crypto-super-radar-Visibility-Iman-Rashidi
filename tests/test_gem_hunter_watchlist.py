@@ -7,6 +7,7 @@ from crypto_super_radar.gem_hunter_watchlist import (
     ensure_watchlist_schema, record_watchlist_candidates, refresh_watchlist_prices,
     watchlist_snapshot, is_watchlist_eligible, send_watchlist_profit_alerts,
 )
+from crypto_super_radar.telegram_notifier import TARGET_CHAT_ID
 
 class WatchlistLedgerTests(unittest.TestCase):
     def setUp(self):
@@ -37,7 +38,7 @@ class WatchlistLedgerTests(unittest.TestCase):
 
         client = Mock()
         verified_chat = {"ok": True, "result": {
-            "id": 77, "username": "Germany004", "type": "private"
+            "id": TARGET_CHAT_ID, "username": "Germany004", "type": "private"
         }}
         client.post.side_effect = [Response(verified_chat)] + [
             Response({"ok": True, "result": {"message_id": index}})
@@ -106,8 +107,8 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertIn("+25%", messages[0])
         self.assertIn("+50%", messages[1])
         self.assertIn("+100%", messages[2])
-        self.assertEqual(client.post.call_args_list[0].kwargs["json"], {"chat_id": 77})
-        self.assertEqual(client.post.call_args_list[1].kwargs["json"]["chat_id"], 77)
+        self.assertEqual(client.post.call_args_list[0].kwargs["json"], {"chat_id": TARGET_CHAT_ID})
+        self.assertEqual(client.post.call_args_list[1].kwargs["json"]["chat_id"], TARGET_CHAT_ID)
         self.assertTrue(all("€200.00" in message and "+€100.00" in message for message in messages))
         self.assertTrue(all("گزارش سود واچ‌لیست رادار" in message for message in messages))
 
@@ -135,7 +136,7 @@ class WatchlistLedgerTests(unittest.TestCase):
             def raise_for_status(self): return None
             def json(self):
                 return {"ok": True, "result": {
-                    "id": 77, "username": "Germany004", "type": "private"
+                    "id": TARGET_CHAT_ID, "username": "Germany004", "type": "private"
                 }}
         failed.post.side_effect = [Response(), RuntimeError("temporary Telegram failure")]
         result = send_watchlist_profit_alerts(
