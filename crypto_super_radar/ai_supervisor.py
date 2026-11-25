@@ -19,6 +19,8 @@ import requests
 
 from . import ai_second_opinion as _ai
 
+GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
+
 MIN_INDEPENDENT_APPROVALS = 2
 MAX_PROVIDER_CALLS_PER_UTC_DAY = 30
 MAX_PROVIDER_CALLS_PER_MINUTE = 10
@@ -47,8 +49,8 @@ _PROVIDER_DEFINITIONS = (
     },
     {
         "id": "groq",
-        "label": "Groq GPT-OSS 120B",
-        "model": "openai/gpt-oss-120b",
+        "label": "Groq GPT-OSS 20B",
+        "model": "openai/gpt-oss-20b",
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "env": "GROQ_API_KEY",
         "aliases": (),
@@ -331,6 +333,36 @@ def run_challenge1_v2_supervisor_reviews(
     expected_wave_phase = str(wave.get("phase") or "").upper()
     expected_wave_direction = str(wave.get("pattern") or "").upper()
 
+    if expected_side not in {"LONG", "SHORT"}:
+        reviewed_at_utc = datetime.now(timezone.utc).isoformat()
+        groq = {
+            "reviewer_id": "groq", "provider": "Groq",
+            "model": _ai.GROQ_DEFAULT_MODEL, "status": "NOT_CALLED",
+            "request_attempted": False, "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
+            "response_source": "NONE", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "reviewed_signal_id": str(signal_id or "").strip(),
+            "reviewed_at_utc": reviewed_at_utc,
+        }
+        consensus = {
+            "status": "NO_TRADE", "reviewer_id": "groq",
+            "reviewer_status": "NOT_CALLED", "reviewer_verified": False,
+            "provider_is_groq": True, "model_is_groq_allowlisted": True,
+            "reviewer_approved": False, "single_reviewer_approval": False,
+            "single_groq_reviewer_approval": False, "two_reviewer_approval": False,
+            "decision": "NO_TRADE_NO_AI_REQUEST", "entry_gate_enforced": True,
+            "expected_side": expected_side,
+            "reviewed_signal_id": str(signal_id or "").strip(),
+            "reviewed_at_utc": reviewed_at_utc,
+        }
+        return {
+            "approved": False, "status": "NO_TRADE", "ai_status": "NO_TRADE",
+            "ai_review": groq, "second_ai_review": None,
+            "ai_reviews": [{"reviewer_id": "groq", "actor": "Groq Supervisor", "review": groq}],
+            "ai_consensus": consensus,
+            "reason_fa": "سیگنال جهت‌دار وجود ندارد؛ برای NO_TRADE هیچ درخواست AI ارسال نشد.",
+        }
+
     def unavailable(error_type: str) -> dict[str, Any]:
         return {
             "reviewer_id": "groq", "provider": "Groq",
@@ -355,9 +387,7 @@ def run_challenge1_v2_supervisor_reviews(
     groq["reviewed_at_utc"] = reviewed_at_utc
 
     provider_name = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
-    allowed_groq_models = {
-        "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    }
+    allowed_groq_models = GROQ_ALLOWED_MODELS
     configured_model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
     verified = bool(
@@ -382,10 +412,7 @@ def run_challenge1_v2_supervisor_reviews(
     provider_value = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
     provider_id = str(groq.get("provider_id") or "").strip().casefold()
     provider_is_groq = provider_value in {"groq", "groqcloud"} or provider_id in {"groq", "groqcloud"}
-    allowed_groq_models = {
-        "openai/gpt-oss-20b",
-        "qwen/qwen3.8-27b",
-    }
+    allowed_groq_models = GROQ_ALLOWED_MODELS
     configured_model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
     model_is_groq_allowlisted = (
