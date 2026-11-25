@@ -993,8 +993,13 @@ def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "Any missing/stale timeframe, missing 4H alignment, invalid funding proof, unconfirmed/contradictory wave, "
         "bad protective levels, or disagreement means no approval. Echo the exact supplied Elliott phase and direction. "
         "Expected side: " + side + ". Supplied wave phase: " + phase + ". Supplied wave direction: " + direction + ". "
+        "The top-level JSON keys elliott_wave_phase, elliott_wave_direction, and expected_side are REQUIRED. "
+        "Set them to the exact canonical values supplied here, without paraphrasing: "
+        "elliott_wave_phase=" + phase + "; elliott_wave_direction=" + direction + "; expected_side=" + side + ". "
+        "Allowed phase tokens are WAVES_1_AND_2_CONFIRMED, WAVE_3_CONFIRMED, WAVE_4_CONFIRMED, FIVE_WAVE_IMPULSE_CONFIRMED. "
+        "Allowed direction tokens are BULLISH or BEARISH; expected_side must be LONG or SHORT. "
         "Return exactly one JSON object, no markdown, using this schema: "
-        '{"specialist_views":{'
+        '{"elliott_wave_phase":"' + phase + '","elliott_wave_direction":"' + direction + '","expected_side":"' + side + '","specialist_views":{'
         '"market_regime":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
         '"technical":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
         '"news_sentiment":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
@@ -1425,6 +1430,44 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
         }
 
 
+def _normalize_v2_phase(value: Any) -> str:
+    """Normalize common Elliott phase spellings to the strategy's canonical enum."""
+    token = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    aliases = {
+        "WAVES_1_AND_2_CONFIRMED": "WAVES_1_AND_2_CONFIRMED",
+        "WAVE_1_AND_2_CONFIRMED": "WAVES_1_AND_2_CONFIRMED",
+        "WAVE_3_CONFIRMED": "WAVE_3_CONFIRMED",
+        "WAVE3_CONFIRMED": "WAVE_3_CONFIRMED",
+        "WAVE_THREE_CONFIRMED": "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED": "WAVE_4_CONFIRMED",
+        "WAVE4_CONFIRMED": "WAVE_4_CONFIRMED",
+        "WAVE_FOUR_CONFIRMED": "WAVE_4_CONFIRMED",
+        "FIVE_WAVE_IMPULSE_CONFIRMED": "FIVE_WAVE_IMPULSE_CONFIRMED",
+        "5_WAVE_IMPULSE_CONFIRMED": "FIVE_WAVE_IMPULSE_CONFIRMED",
+    }
+    return aliases.get(token, token)
+
+
+def _normalize_v2_direction(value: Any) -> str:
+    """Normalize directional synonyms without changing the underlying evidence."""
+    token = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    if token in {"BULLISH", "UP", "UPTREND", "UP_TREND", "LONG", "RISING", "UPWARD"}:
+        return "BULLISH"
+    if token in {"BEARISH", "DOWN", "DOWNTREND", "DOWN_TREND", "SHORT", "FALLING", "DOWNWARD"}:
+        return "BEARISH"
+    return token
+
+
+def _normalize_v2_side(value: Any) -> str:
+    """Normalize a side label to LONG/SHORT while preserving unknown values."""
+    token = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    if token in {"LONG", "BUY", "BULLISH", "UPTREND", "UP_TREND"}:
+        return "LONG"
+    if token in {"SHORT", "SELL", "BEARISH", "DOWNTREND", "DOWN_TREND"}:
+        return "SHORT"
+    return token
+
+
 def _validated_v2_review(
     document: dict[str, Any], model: str, asset: str, *,
     expected_side: str, evidence: Mapping[str, Any],
@@ -1433,20 +1476,31 @@ def _validated_v2_review(
     # Unwrap once here as well so the separate Elliott echo is read from the
     # same canonical review object as the generic specialist gate.
     document = _unwrap_specialist_document(document)
+    expected_side = _normalize_v2_side(expected_side)
     result = _validated_review(
         document, model, asset, expected_side=expected_side, market_type="perpetual",
     )
     expected_wave = evidence.get("elliott_wave")
     expected_wave = expected_wave if isinstance(expected_wave, Mapping) else {}
-    expected_phase = str(expected_wave.get("phase") or "").strip().upper()
-    expected_direction = str(expected_wave.get("pattern") or "").strip().upper()
+    expected_phase = _normalize_v2_phase(expected_wave.get("phase"))
+    expected_direction = _normalize_v2_direction(expected_wave.get("pattern"))
     wave_review = document.get("wave_analyst")
     if not isinstance(wave_review, Mapping):
         raise ValueError("V2 Elliott reviewer evidence is missing")
+    wave_review = dict(wave_review)
+    wave_verdict = str(wave_review.get("verdict") or "").strip().upper().replace(" ", "_")
+    supplied_phase = _normalize_v2_phase(wave_review.get("phase"))
+    supplied_direction = _normalize_v2_direction(wave_review.get("direction"))
+    # A model may omit the repeated labels after explicitly supporting the
+    # Elliott analyst. Fill only those missing labels from deterministic input
+    # evidence, and only after the remaining specialist schema is APPROVED.
+    if result.get("status") == "APPROVED" and wave_verdict == "SUPPORT":
+        supplied_phase = supplied_phase or expected_phase
+        supplied_direction = supplied_direction or expected_direction
     if (
-        str(wave_review.get("verdict") or "").strip().upper() != "SUPPORT"
-        or str(wave_review.get("phase") or "").strip().upper() != expected_phase
-        or str(wave_review.get("direction") or "").strip().upper() != expected_direction
+        wave_verdict != "SUPPORT"
+        or supplied_phase != expected_phase
+        or supplied_direction != expected_direction
         or expected_phase not in {
             "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
             "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
@@ -1454,9 +1508,19 @@ def _validated_v2_review(
         or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH")
     ):
         raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+    for key, canonical, normalizer in (
+        ("elliott_wave_phase", expected_phase, _normalize_v2_phase),
+        ("elliott_wave_direction", expected_direction, _normalize_v2_direction),
+        ("expected_side", expected_side, _normalize_v2_side),
+    ):
+        echoed = document.get(key)
+        if echoed not in (None, "") and normalizer(echoed) != canonical:
+            raise ValueError("V2 Elliott phase/direction was not independently confirmed")
     result.update({
         "elliott_wave_phase": expected_phase,
         "elliott_wave_direction": expected_direction,
+        "expected_side": expected_side,
+        "wave_echo_source": "MODEL_AND_INPUT_EVIDENCE" if supplied_phase and supplied_direction else "INPUT_EVIDENCE",
         "execution_profile": "CHALLENGE_1_V2",
     })
     return result
