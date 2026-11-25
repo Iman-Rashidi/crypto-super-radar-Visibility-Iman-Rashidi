@@ -180,3 +180,4 @@ jobs:
           retention-days: 7
 
 # Staging Demo cycle trigger marker: 2026-11-23 (no runtime behavior change).
+# Post-deploy single-cycle request marker: 2026-11-25, after Render Staging f8644f3 LIVE.
