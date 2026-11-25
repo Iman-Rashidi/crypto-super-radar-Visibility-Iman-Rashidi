@@ -40,9 +40,10 @@ from .challenge1_strategy import challenge1_entry_evidence_ready
 from .challenge1_v2_trade_controls import v2_entry_capacity
 from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .learning_experience_memory import LearningExperienceMemory
-
-
-GROQ_ALLOWED_MODELS = frozenset({"openai/gpt-oss-20b", "qwen/qwen3.8-27b"})
+from .ai_second_opinion import (
+    GROQ_ALLOWED_MODELS, _normalize_v2_phase, _normalize_v2_direction,
+    normalize_groq_model_id,
+)
 
 
 class BloFinDemoExecutionBlocked(RuntimeError):
@@ -179,12 +180,15 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         )
     if not wave_gate_ready:
         return False, "A valid directional signal and aligned confirmed Elliott phase are required."
+    easy_demo_entry = execution_profile == "CHALLENGE_1_V2" and _easy_demo_entry_enabled()
 
     consensus = record.get("ai_consensus")
     if not isinstance(consensus, Mapping):
         return False, "The verified Groq reviewer consensus record is missing."
     signal_id = str(record.get("signal_id") or "").strip()
     consensus_signal_id = str(consensus.get("reviewed_signal_id") or "").strip()
+    approved_phase = _normalize_v2_phase(consensus.get("elliott_wave_phase"))
+    approved_direction = _normalize_v2_direction(consensus.get("elliott_wave_direction"))
     if not signal_id or consensus_signal_id != signal_id:
         return False, "The Groq reviewer approval is not bound to this exact signal_id."
     try:
@@ -214,8 +218,9 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
             and consensus.get("reviewer_approved") is True
             and consensus.get("reviewed_signal_id") == signal_id
             and consensus.get("expected_side") == side
-            and consensus.get("elliott_wave_phase") == wave_phase
-            and consensus.get("elliott_wave_direction") == wave_direction
+            and (easy_demo_entry or consensus.get("elliott_wave_phase") == wave_phase)
+            and (easy_demo_entry or consensus.get("elliott_wave_direction") == wave_direction)
+            and (not easy_demo_entry or bool(approved_phase and approved_direction))
         )
         if not required_groq_consensus:
             return False, "The recorded single-Groq approval is not valid for this V2 signal."
@@ -233,9 +238,9 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         provider = str(review.get("provider") or "").strip().casefold()
         model = str(review.get("model") or "").strip()
         returned_model = str(review.get("returned_model") or "").strip()
-        model_identity = model.split(":", 1)[0].casefold()
-        returned_identity = returned_model.split(":", 1)[0].casefold()
-        allowed_groq_models = GROQ_ALLOWED_MODELS
+        model_identity = normalize_groq_model_id(model)
+        returned_identity = normalize_groq_model_id(returned_model)
+        allowed_groq_models = {normalize_groq_model_id(item) for item in GROQ_ALLOWED_MODELS}
         try:
             reviewer_time = datetime.fromisoformat(
                 str(review.get("reviewed_at_utc") or "").replace("Z", "+00:00")
@@ -261,8 +266,13 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
             and -30 <= reviewer_age <= 300
             and str(review.get("expected_side") or "").strip().upper() == side
             and str(review.get("trader_proposal") or "").strip().upper() == side
-            and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
-            and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
+            and (
+                (_normalize_v2_phase(review.get("elliott_wave_phase")) == approved_phase
+                 and _normalize_v2_direction(review.get("elliott_wave_direction")) == approved_direction)
+                if easy_demo_entry else
+                (str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
+                 and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction)
+            )
         )
         if not valid_groq_review:
             return False, "Groq did not provide a fresh, verified live approval aligned with this exact signal and Elliott phase."
@@ -613,7 +623,11 @@ def build_demo_order_plan(
     risk_budget = equity * Decimal(str(policy.risk_per_trade_pct))
     risk_per_contract = risk_distance * contract_value
     risk_quantity = risk_budget / risk_per_contract
-    margin_budget = equity * Decimal(str(policy.max_margin_usage_pct))
+    # Divide the account-wide margin allowance across all concurrent slots.
+    margin_budget = (
+        equity * Decimal(str(policy.max_margin_usage_pct))
+        / Decimal(int(policy.max_concurrent_positions))
+    )
     notional_per_contract = entry * contract_value
     margin_quantity = margin_budget * Decimal(int(leverage)) / notional_per_contract
     quantity_before_lot = min(risk_quantity, margin_quantity)
@@ -622,15 +636,21 @@ def build_demo_order_plan(
             Decimal(str(policy.max_position_notional_usdt)) / notional_per_contract
         )
         quantity_before_lot = min(quantity_before_lot, notional_cap_quantity)
-    quantity = (quantity_before_lot / lot_size).to_integral_value(rounding=ROUND_FLOOR) * lot_size
-    if quantity < min_size:
-        raise BloFinDemoExecutionBlocked("Risk-sized quantity is below the contract's minSize.")
+    # Even lot steps make an exact 50% TP1 close representable.
+    tp1_lot_quantum = lot_size * Decimal("2")
+    quantity = ((quantity_before_lot / tp1_lot_quantum)
+                .to_integral_value(rounding=ROUND_FLOOR) * tp1_lot_quantum)
+    if quantity < (min_size * Decimal("2")):
+        raise BloFinDemoExecutionBlocked(
+            "Risk-sized quantity is below twice minSize required for an exact 50% TP1."
+        )
 
     max_market_size = instrument.get("maxMarketSize")
     if max_market_size not in (None, "") and quantity > _decimal(max_market_size, "maxMarketSize"):
-        quantity = (_decimal(max_market_size, "maxMarketSize") / lot_size).to_integral_value(rounding=ROUND_FLOOR) * lot_size
-    if quantity < min_size:
-        raise BloFinDemoExecutionBlocked("Quantity is outside the contract's market-size limits.")
+        quantity = ((_decimal(max_market_size, "maxMarketSize") / tp1_lot_quantum)
+                    .to_integral_value(rounding=ROUND_FLOOR) * tp1_lot_quantum)
+    if quantity < (min_size * Decimal("2")):
+        raise BloFinDemoExecutionBlocked("Quantity is outside market-size limits for exact 50% TP1.")
 
     digest = hashlib.sha256(f"{signal_id}|{inst_id}|{side}".encode("utf-8")).hexdigest()
     client_order_id = digest[:32]
@@ -663,6 +683,7 @@ def build_demo_order_plan(
         "reserved_margin_usdt": _format_decimal(reserved_margin),
         "aggregate_risk_limit_usdt": _format_decimal(aggregate_risk_limit),
         "aggregate_margin_limit_usdt": _format_decimal(aggregate_margin_limit),
+        "per_position_margin_budget_usdt": _format_decimal(margin_budget),
         "leverage": int(leverage),
         "reward_risk": float(reward_distance / risk_distance),
         "position_side_long_short": side.lower(),
@@ -785,8 +806,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
     AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
     CANCEL_TPSL_PATH = "/api/v1/trade/cancel-tpsl"
+    CANCEL_ORDER_PATH = "/api/v1/trade/cancel-order"
     ALLOWED_POST_PATHS = frozenset({
         ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH, CANCEL_TPSL_PATH,
+        CANCEL_ORDER_PATH,
     })
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1126,6 +1149,84 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
                 "SL amendment receipt was returned but the active exchange stop could not be verified."
             )
         return {**payload, "sl_verified": True, "tpsl_id": tpsl_id}
+
+    def cancel_order(
+        self, *, inst_id: str, client_order_id: str, order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel one exact pending futures order after a client-ID read-back."""
+        self._exit_client_id(client_order_id)
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo perpetual order can be canceled.")
+        details = self.get_order_detail(inst_id, client_order_id=client_order_id)
+        if isinstance(details, Mapping):
+            nested = details.get("data")
+            details = [nested] if isinstance(nested, Mapping) else nested if isinstance(nested, list) else [details]
+        if not isinstance(details, list):
+            raise BloFinDemoResponseError("Order-detail response has an unsupported shape.")
+        exact = [row for row in details if isinstance(row, Mapping)
+                 and str(row.get("instId") or "").upper() == inst_id
+                 and str(row.get("clientOrderId") or "") == client_order_id]
+        if len(exact) != 1:
+            raise BloFinDemoExecutionUnknown("The exact Demo limit order cannot be identified for cancellation.")
+        row = exact[0]
+        returned_order_id = str(row.get("orderId") or "").strip()
+        if not returned_order_id or (order_id and returned_order_id != str(order_id)):
+            raise BloFinDemoExecutionUnknown("BloFin order ID does not match the journaled limit order.")
+        state = str(row.get("state") or "").strip().lower()
+        if state in {"filled", "effective", "canceled", "partially_canceled", "order_failed"}:
+            return {"status": "ALREADY_FILLED" if state == "filled" else "ALREADY_TERMINAL",
+                    "order_id": returned_order_id, "state": state}
+        if state not in {"live", "partially_filled"}:
+            raise BloFinDemoExecutionUnknown("Limit-order state is ambiguous; cancellation is blocked.")
+        receipt = self._post(self.CANCEL_ORDER_PATH, {"orderId": returned_order_id})
+        after_rows = self.get_order_detail(inst_id, client_order_id=client_order_id)
+        if isinstance(after_rows, Mapping):
+            nested = after_rows.get("data")
+            after_rows = [nested] if isinstance(nested, Mapping) else nested if isinstance(nested, list) else [after_rows]
+        if not isinstance(after_rows, list):
+            raise BloFinDemoExecutionUnknown("Canceled limit order could not be read back.")
+        after = [item for item in after_rows if isinstance(item, Mapping)
+                 and str(item.get("instId") or "").upper() == inst_id
+                 and str(item.get("clientOrderId") or "") == client_order_id
+                 and str(item.get("orderId") or "") == returned_order_id]
+        if len(after) != 1:
+            raise BloFinDemoExecutionUnknown("Canceled limit order identity could not be confirmed.")
+        after_state = str(after[0].get("state") or "").strip().lower()
+        if after_state == "filled":
+            return {"status": "ALREADY_FILLED", "order_id": returned_order_id, "state": after_state}
+        if after_state not in {"canceled", "partially_canceled"}:
+            raise BloFinDemoExecutionUnknown("Limit-order cancellation is not confirmed; market exit is blocked.")
+        return {**receipt, "status": "CANCELED", "order_id": returned_order_id,
+                "previous_state": state, "verified_state": after_state}
+
+    def place_market_exit_reduce_only(
+        self, *, inst_id: str, client_order_id: str, position_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close the exact remaining isolated net-mode Demo position at market."""
+        self._exit_client_id(client_order_id)
+        position = self._net_position_for_exit(inst_id=inst_id, position_id=position_id)
+        if str(position.get("marginMode") or "").strip().lower() != "isolated":
+            raise BloFinDemoExecutionBlocked("Market reduce-only exit requires isolated margin.")
+        signed_size = position["_signed_size_decimal"]
+        instrument = self.get_tradable_instrument(inst_id)
+        lot = _decimal(instrument.get("lotSize"), "lotSize")
+        minimum = _decimal(instrument.get("minSize"), "minSize")
+        quantity = abs(signed_size)
+        if quantity < minimum or quantity % lot != 0:
+            raise BloFinDemoExecutionBlocked("The remaining position size violates lotSize/minSize.")
+        body = {
+            "instId": inst_id,
+            "marginMode": "isolated",
+            "positionSide": "net",
+            "side": "sell" if signed_size > 0 else "buy",
+            "orderType": "market",
+            "size": _format_decimal(quantity),
+            "reduceOnly": "true",
+            "clientOrderId": client_order_id,
+        }
+        # net_mode never accepts positionId on the order body; the identity was
+        # already verified by _net_position_for_exit above.
+        return self._post(self.ORDER_PATH, body)
 
     def place_limit_exit_reduce_only(
         self, *, inst_id: str, limit_price: str, client_order_id: str,

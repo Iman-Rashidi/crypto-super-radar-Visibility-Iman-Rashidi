@@ -81,9 +81,9 @@ class ManagedProfitTop1Tests(unittest.TestCase):
     def test_one_shot_policy_limits_to_one_position_and_preserves_risk_caps(self):
         policy = _one_position_risk_policy()
         self.assertEqual(policy.max_concurrent_positions, 1)
-        self.assertEqual(policy.risk_per_trade_pct, 0.005)
-        self.assertEqual(policy.max_aggregate_risk_pct, 0.005)
-        self.assertEqual(policy.max_leverage, 1)
+        self.assertEqual(policy.risk_per_trade_pct, 0.0025)
+        self.assertEqual(policy.max_aggregate_risk_pct, 0.01)
+        self.assertEqual(policy.max_leverage, 3)
 
     def test_single_entry_executor_allows_only_one_attempt(self):
         class FakeStore:

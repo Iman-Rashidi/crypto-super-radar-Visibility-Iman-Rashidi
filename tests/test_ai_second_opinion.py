@@ -1719,6 +1719,9 @@ class V2WaveNormalizationRegressionTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "APPROVED")
         self.assertTrue(result["elliott_is_advisory"])
+        self.assertEqual(result["elliott_wave_phase"], "UNKNOWN")
+        self.assertEqual(result["elliott_wave_direction"], "UNKNOWN")
+        self.assertEqual(result["wave_echo_source"], "MODEL_ADVISORY")
 
     def test_easy_demo_prompt_marks_elliott_and_4h_as_advisory(self):
         from crypto_super_radar.ai_second_opinion import _v2_prompt_messages
@@ -1787,3 +1790,32 @@ class V2EasyDemoNativeCouncilTests(unittest.TestCase):
             review = _challenge1_v2_native_review(record)
         self.assertEqual(review["status"], "UNKNOWN")
         self.assertIn("geometry", review["reason"])
+
+
+class GroqModelAllowlistNormalizationTests(unittest.TestCase):
+    def test_revision_suffix_is_removed_before_allowlist_comparison(self):
+        from crypto_super_radar.ai_second_opinion import (
+            GROQ_ALLOWED_MODELS, normalize_groq_model_id,
+        )
+        self.assertIn("openai/gpt-oss-20b", GROQ_ALLOWED_MODELS)
+        self.assertEqual(
+            normalize_groq_model_id("openai/gpt-oss-20b:active-revision"),
+            "openai/gpt-oss-20b",
+        )
+        self.assertIn(
+            normalize_groq_model_id("qwen/qwen3.8-27b:production"),
+            {normalize_groq_model_id(item) for item in GROQ_ALLOWED_MODELS},
+        )
+
+    def test_second_ai_groq_connection_accepts_revision_suffix_for_active_model(self):
+        env = {
+            "CSR_SECOND_AI_PROVIDER": "groq",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-20b:active-revision",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+            "CSR_SECOND_AI_API_KEY": "gsk_second_demo_key",
+            "GROQ_API_KEY": "gsk_second_demo_key",
+            "OPENROUTER_API_KEY": "or_separate_key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])

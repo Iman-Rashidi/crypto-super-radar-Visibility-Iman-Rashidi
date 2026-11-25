@@ -1,7 +1,7 @@
 """Scheduled Challenge 1 V2 Demo autopilot with guarded entry and exit managers."""
 from __future__ import annotations
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import logging
 import hashlib
 import json
@@ -50,17 +50,18 @@ def preflight_errors(environ: Mapping[str, str] | None = None) -> list[str]:
 
 
 def build_v2_demo_risk_policy():
-    """Return the explicit four-slot V2 Demo policy with conservative 1x risk caps."""
+    """Return the four-slot Demo policy with evenly allocated risk and margin."""
     from .blofin_demo_executor import BloFinDemoRiskPolicy
     return BloFinDemoRiskPolicy(
-        risk_per_trade_pct=0.005,
-        daily_loss_limit_pct=0.01,
+        risk_per_trade_pct=0.0025,
+        daily_loss_limit_pct=0.02,
         max_drawdown_pct=0.05,
-        max_margin_usage_pct=0.10,
-        max_aggregate_risk_pct=0.005,
+        max_margin_usage_pct=0.25,
+        max_aggregate_risk_pct=0.01,
         max_position_notional_usdt=5000.0,
-        max_leverage=1,
+        max_leverage=3,
         max_concurrent_positions=4,
+        min_reward_risk=1.4,
     )
 
 
@@ -119,128 +120,171 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
     states = store.list_v2_position_exit_states(active_only=True, limit=100)
     results = []
     for wrapped in states:
-        state = dict(wrapped.get("payload") or wrapped)
-        pid, inst = str(state.get("position_id") or ""), str(state.get("instrument_id") or "").upper()
-        if not pid or not inst or state.get("status") in {"HALTED", "CLOSED"}:
-            continue
-        positions = _rows(client.get_positions(inst_id=inst))
-        exact = [p for p in positions if str(p.get("positionId") or "") == pid
-            and str(p.get("instId") or "").upper() == inst
-            and str(p.get("positionSide") or "").lower() == "net"
-            and Decimal(str(p.get("positions") or "0")) != 0]
-        if len(exact) != 1:
-            # A missing live position is not proof of closure. Reconcile exact
-            # positionId against Demo partial/closed history before recording.
-            if not exact:
-                try:
-                    partial_rows = _rows(client.get_positions_history(inst_id=inst, state="partially_closed", limit=100))
-                    closed_rows = _rows(client.get_positions_history(inst_id=inst, state="closed", limit=100))
-                    outcome = store.record_closed_position_outcome(
-                        instrument_id=inst, history_rows=closed_rows, partial_rows=partial_rows,
-                        client_order_id=str(state.get("client_order_id") or ""), position_id=pid,
-                    )
-                    if isinstance(outcome, Mapping) and outcome.get("status") == "RECORDED":
-                        history = [r for r in (partial_rows + closed_rows)
-                            if str(r.get("positionId") or "") == pid]
-                        raw_reason = " ".join(str(
-                            next((r.get(k) for r in reversed(history) if r.get(k)),
-                                 state.get("exit_reason") or "")
-                        ) for k in ("closeType", "closeReason", "reason", "exitType")).strip().upper()
-                        if str(state.get("status") or "").upper() == "TIME_EXIT_PENDING" or str(state.get("exit_order_id") or "").startswith("TIME"):
-                            exit_reason = "TIME_EXIT"
-                        elif any(term in raw_reason for term in ("STOP", "SL", "LOSS")):
-                            exit_reason = "SL"
-                        elif any(term in raw_reason for term in ("TAKE", "TP", "PROFIT")):
-                            exit_reason = "TP"
-                        else:
-                            exit_reason = raw_reason[:48] or "EXCHANGE_CLOSED"
-                        state.update(status="CLOSED", exit_reason=exit_reason,
-                            closed_history_ids=outcome.get("history_ids", []))
-                        store.save_v2_position_exit_state(state)
-                        if notifier is not None:
-                            notifier.notify_async(
-                                f"challenge1-v2:closed:{pid}",
-                                f"🏁 معامله {inst} پایان یافت\\nجهت: {state.get('side')}\\nدلیل خروج: {exit_reason}\\n"
-                                f"PnL پس از کارمزد معاملاتی (پیش از Funding): {outcome.get('realized_pnl_after_reported_trading_fees')} USDT",
-                            )
-                        results.append({"position_id":pid,"status":"CLOSED_RECONCILED","exit_reason":exit_reason})
+        pid = ""
+        try:
+            state = dict(wrapped.get("payload") or wrapped)
+            pid, inst = str(state.get("position_id") or ""), str(state.get("instrument_id") or "").upper()
+            if not pid or not inst or state.get("status") in {"HALTED", "CLOSED"}:
+                continue
+            positions = _rows(client.get_positions(inst_id=inst))
+            exact = [p for p in positions if str(p.get("positionId") or "") == pid
+                and str(p.get("instId") or "").upper() == inst
+                and str(p.get("positionSide") or "").lower() == "net"
+                and Decimal(str(p.get("positions") or "0")) != 0]
+            if len(exact) != 1:
+                # A missing live position is not proof of closure. Reconcile exact
+                # positionId against Demo partial/closed history before recording.
+                if not exact:
+                    try:
+                        partial_rows = _rows(client.get_positions_history(inst_id=inst, state="partially_closed", limit=100))
+                        closed_rows = _rows(client.get_positions_history(inst_id=inst, state="closed", limit=100))
+                        outcome = store.record_closed_position_outcome(
+                            instrument_id=inst, history_rows=closed_rows, partial_rows=partial_rows,
+                            client_order_id=str(state.get("client_order_id") or ""), position_id=pid,
+                        )
+                        if isinstance(outcome, Mapping) and outcome.get("status") == "RECORDED":
+                            history = [r for r in (partial_rows + closed_rows)
+                                if str(r.get("positionId") or "") == pid]
+                            raw_reason = " ".join(str(
+                                next((r.get(k) for r in reversed(history) if r.get(k)),
+                                     state.get("exit_reason") or "")
+                            ) for k in ("closeType", "closeReason", "reason", "exitType")).strip().upper()
+                            if str(state.get("status") or "").upper() == "TIME_EXIT_PENDING" or str(state.get("exit_order_id") or "").startswith("TIME"):
+                                exit_reason = "TIME_EXIT"
+                            elif any(term in raw_reason for term in ("STOP", "SL", "LOSS")):
+                                exit_reason = "SL"
+                            elif any(term in raw_reason for term in ("TAKE", "TP", "PROFIT")):
+                                exit_reason = "TP"
+                            else:
+                                exit_reason = raw_reason[:48] or "EXCHANGE_CLOSED"
+                            state.update(status="CLOSED", exit_reason=exit_reason,
+                                closed_history_ids=outcome.get("history_ids", []))
+                            store.save_v2_position_exit_state(state)
+                            if notifier is not None:
+                                notifier.notify_async(
+                                    f"challenge1-v2:closed:{pid}",
+                                    f"🏁 معامله {inst} پایان یافت\nجهت: {state.get('side')}\nدلیل خروج: {exit_reason}\n"
+                                    f"PnL پس از کارمزد معاملاتی (پیش از Funding): {outcome.get('realized_pnl_after_reported_trading_fees')} USDT",
+                                )
+                            results.append({"position_id":pid,"status":"CLOSED_RECONCILED","exit_reason":exit_reason})
+                            continue
+                        results.append({"position_id":pid,"status":str((outcome or {}).get("status") or "CLOSE_HISTORY_NOT_RECONCILED")})
                         continue
-                    results.append({"position_id":pid,"status":str((outcome or {}).get("status") or "CLOSE_HISTORY_NOT_RECONCILED")})
+                    except Exception as exc:
+                        results.append({"position_id":pid,"status":"CLOSE_HISTORY_CHECK_FAILED","error_type":type(exc).__name__})
+                        continue
+                results.append({"position_id":pid,"status":"POSITION_NOT_EXACTLY_IDENTIFIED"})
+                continue
+            marks = _rows(client.get_mark_price(inst_id=inst))
+            if len(marks) != 1 or not marks[0].get("markPrice"):
+                results.append({"position_id":pid,"status":"MARK_PRICE_UNAVAILABLE"})
+                continue
+            mark, entry, stop = Decimal(str(marks[0]["markPrice"])), Decimal(str(state["entry_price"])), Decimal(str(state["initial_stop_loss"]))
+            risk, side = abs(entry-stop), str(state["side"]).upper()
+            if risk <= 0 or side not in {"LONG","SHORT"}:
+                results.append({"position_id":pid,"status":"INVALID_RISK_STATE"})
+                continue
+            target = entry + risk*Decimal("1.2") if side=="LONG" else entry-risk*Decimal("1.2")
+            reached = mark >= target if side=="LONG" else mark <= target
+            if reached and not state.get("tp1_executed",False) and state.get("status") not in {"TIME_EXIT_PENDING","TIME_EXIT_MARKET_PENDING"}:
+                cid = _exit_id("TP1",pid)
+                if state.get("status") != "TP1_PENDING":
+                    # Persist intent before the exchange write. A restart never blindly resubmits.
+                    state.update(status="TP1_PENDING",tp1_exit_order_id=cid)
+                    store.save_v2_position_exit_state(state)
+                    client.partial_close_reduce_only(inst_id=inst,client_order_id=cid,position_id=pid)
+                details = _rows(client.get_order_detail(inst,client_order_id=cid))
+                detail = next((d for d in details if str(d.get("clientOrderId") or "")==cid),None)
+                half = Decimal(str(state["original_size"]))/Decimal("2")
+                if not detail or str(detail.get("state") or "").lower() not in {"filled","partially_filled"} or Decimal(str(detail.get("filledSize") or "0")) != half:
+                    results.append({"position_id":pid,"status":"TP1_FILL_UNCONFIRMED"})
                     continue
-                except Exception as exc:
-                    results.append({"position_id":pid,"status":"CLOSE_HISTORY_CHECK_FAILED","error_type":type(exc).__name__})
+                net_be, tpsl = state.get("net_break_even_price"), str(state.get("sl_tpsl_id") or "")
+                if not net_be or not tpsl:
+                    results.append({"position_id":pid,"status":"NET_BE_OR_TPSL_ID_MISSING"})
                     continue
-            results.append({"position_id":pid,"status":"POSITION_NOT_EXACTLY_IDENTIFIED"})
-            continue
-        marks = _rows(client.get_mark_price(inst_id=inst))
-        if len(marks) != 1 or not marks[0].get("markPrice"):
-            results.append({"position_id":pid,"status":"MARK_PRICE_UNAVAILABLE"})
-            continue
-        mark, entry, stop = Decimal(str(marks[0]["markPrice"])), Decimal(str(state["entry_price"])), Decimal(str(state["initial_stop_loss"]))
-        risk, side = abs(entry-stop), str(state["side"]).upper()
-        if risk <= 0 or side not in {"LONG","SHORT"}:
-            results.append({"position_id":pid,"status":"INVALID_RISK_STATE"})
-            continue
-        target = entry + risk*Decimal("1.2") if side=="LONG" else entry-risk*Decimal("1.2")
-        reached = mark >= target if side=="LONG" else mark <= target
-        if reached and not state.get("tp1_executed",False):
-            cid = _exit_id("TP1",pid)
-            if state.get("status") != "TP1_PENDING":
-                # Persist intent before the exchange write. A restart never blindly resubmits.
-                state.update(status="TP1_PENDING",tp1_exit_order_id=cid)
+                amended = client.amend_or_replace_sl(inst_id=inst,tpsl_id=tpsl,new_stop_loss=str(net_be),
+                    request_id=_exit_id("BE",pid),position_id=pid)
+                if amended.get("sl_verified") is not True:
+                    results.append({"position_id":pid,"status":"SL_AMENDMENT_UNVERIFIED"})
+                    continue
+                state.update(tp1_executed=True,remaining_size=str(Decimal(str(state["original_size"]))-half),
+                    status="TP1_EXECUTED",break_even_stop_loss=str(net_be),tp1_exit_order_id=cid)
                 store.save_v2_position_exit_state(state)
-                client.partial_close_reduce_only(inst_id=inst,client_order_id=cid,position_id=pid)
-            details = _rows(client.get_order_detail(inst,client_order_id=cid))
-            detail = next((d for d in details if str(d.get("clientOrderId") or "")==cid),None)
-            half = Decimal(str(state["original_size"]))/Decimal("2")
-            if not detail or str(detail.get("state") or "").lower() not in {"filled","partially_filled"} or Decimal(str(detail.get("filledSize") or "0")) != half:
-                results.append({"position_id":pid,"status":"TP1_FILL_UNCONFIRMED"})
+                if notifier is not None:
+                    notifier.notify_async(
+                        f"challenge1-v2:tp1:{pid}",
+                        f"🎯 TP1 تأیید شد: {inst}\nجهت: {side}\nپرشدن: ۵۰٪ حجم\n"
+                        f"حد ضرر به نقطه سربه‌سر منتقل و تأیید شد: {net_be}",
+                    )
+                results.append({"position_id":pid,"status":"TP1_EXECUTED_SL_VERIFIED"})
                 continue
-            net_be, tpsl = state.get("net_break_even_price"), str(state.get("sl_tpsl_id") or "")
-            if not net_be or not tpsl:
-                results.append({"position_id":pid,"status":"NET_BE_OR_TPSL_ID_MISSING"})
+            candles = client.get_candles(inst,bar="15m",limit=30)
+            entry_ms, closed = int(state.get("entry_time_ms") or 0), set()
+            for candle in candles if isinstance(candles,list) else []:
+                try:
+                    ts=int(candle[0])
+                    if str(candle[8])=="1" and ts>=entry_ms and ts+900000<=now_ms:
+                        closed.add(ts)
+                except (IndexError,TypeError,ValueError):
+                    continue
+            state["candles_elapsed"]=max(int(state.get("candles_elapsed") or 0),len(closed))
+            current_status=str(state.get("status") or "").upper()
+            if current_status=="TIME_EXIT_MARKET_PENDING":
+                market_cid=_exit_id("TMKT",pid)
+                market_details=_rows(client.get_order_detail(inst,client_order_id=market_cid))
+                existing=next((d for d in market_details if str(d.get("clientOrderId") or "")==market_cid),None)
+                results.append({"position_id":pid,"status":"TIME_EXIT_MARKET_PENDING" if existing else "TIME_EXIT_MARKET_UNRESOLVED"})
                 continue
-            amended = client.amend_or_replace_sl(inst_id=inst,tpsl_id=tpsl,new_stop_loss=str(net_be),
-                request_id=_exit_id("BE",pid),position_id=pid)
-            if amended.get("sl_verified") is not True:
-                results.append({"position_id":pid,"status":"SL_AMENDMENT_UNVERIFIED"})
+            if current_status=="TIME_EXIT_PENDING":
+                pending_cycles=int(state.get("time_exit_pending_cycles") or 0)+1
+                pending_candles=max(0,state["candles_elapsed"]-int(state.get("time_exit_started_candles") or state["candles_elapsed"]))
+                state.update(time_exit_pending_cycles=pending_cycles,time_exit_pending_candles=pending_candles)
+                store.save_v2_position_exit_state(state)
+                if pending_candles>=1 or pending_cycles>=2:
+                    old_cid=str(state.get("exit_order_id") or "")
+                    receipt=state.get("time_exit_receipt") or {}
+                    receipt_data=receipt.get("data") if isinstance(receipt,Mapping) else None
+                    receipt_row=receipt_data[0] if isinstance(receipt_data,list) and receipt_data and isinstance(receipt_data[0],Mapping) else {}
+                    old_order_id=str(receipt_row.get("orderId") or "") or None
+                    canceled=client.cancel_order(inst_id=inst,client_order_id=old_cid,order_id=old_order_id)
+                    if str(canceled.get("status") or "")=="ALREADY_FILLED":
+                        results.append({"position_id":pid,"status":"TIME_EXIT_LIMIT_ALREADY_FILLED"})
+                        continue
+                    market_cid=_exit_id("TMKT",pid)
+                    state.update(status="TIME_EXIT_MARKET_PENDING",time_exit_market_order_id=market_cid,
+                        time_exit_cancel_receipt=canceled)
+                    store.save_v2_position_exit_state(state)
+                    market_receipt=client.place_market_exit_reduce_only(
+                        inst_id=inst,client_order_id=market_cid,position_id=pid)
+                    state.update(time_exit_market_receipt=market_receipt)
+                    store.save_v2_position_exit_state(state)
+                    results.append({"position_id":pid,"status":"TIME_EXIT_MARKET_SUBMITTED"})
+                else:
+                    results.append({"position_id":pid,"status":"TIME_EXIT_ALREADY_PENDING",
+                        "pending_cycles":pending_cycles,"pending_candles":pending_candles})
                 continue
-            state.update(tp1_executed=True,remaining_size=str(Decimal(str(state["original_size"]))-half),
-                status="TP1_EXECUTED",break_even_stop_loss=str(net_be),tp1_exit_order_id=cid)
-            store.save_v2_position_exit_state(state)
-            if notifier is not None:
-                notifier.notify_async(
-                    f"challenge1-v2:tp1:{pid}",
-                    f"🎯 TP1 تأیید شد: {inst}\\nجهت: {side}\\nپرشدن: ۵۰٪ حجم\\n"
-                    f"حد ضرر به نقطه سربه‌سر منتقل و تأیید شد: {net_be}",
-                )
-            results.append({"position_id":pid,"status":"TP1_EXECUTED_SL_VERIFIED"})
-            continue
-        candles = client.get_candles(inst,bar="15m",limit=30)
-        entry_ms, closed = int(state.get("entry_time_ms") or 0), set()
-        for candle in candles if isinstance(candles,list) else []:
-            try:
-                ts=int(candle[0])
-                if str(candle[8])=="1" and ts>=entry_ms and ts+900000<=now_ms:
-                    closed.add(ts)
-            except (IndexError,TypeError,ValueError):
-                continue
-        state["candles_elapsed"]=max(int(state.get("candles_elapsed") or 0),len(closed))
-        if state["candles_elapsed"]>=12:
-            if state.get("status")=="TIME_EXIT_PENDING":
-                results.append({"position_id":pid,"status":"TIME_EXIT_ALREADY_PENDING"})
-                continue
-            cid=_exit_id("TIME",pid)
-            state.update(status="TIME_EXIT_PENDING",exit_order_id=cid)
-            store.save_v2_position_exit_state(state)
-            receipt=client.place_limit_exit_reduce_only(inst_id=inst,limit_price=str(mark),
-                client_order_id=cid,position_id=pid)
-            state.update(time_exit_receipt=receipt)
-            store.save_v2_position_exit_state(state)
-            results.append({"position_id":pid,"status":"TIME_EXIT_SUBMITTED"})
-        else:
-            store.save_v2_position_exit_state(state)
-            results.append({"position_id":pid,"status":"MONITORED","candles_elapsed":state["candles_elapsed"]})
+            if state["candles_elapsed"]>=12:
+                cid=_exit_id("TIME",pid)
+                state.update(status="TIME_EXIT_PENDING",exit_order_id=cid,
+                    time_exit_pending_cycles=0,time_exit_pending_candles=0,
+                    time_exit_started_candles=state["candles_elapsed"])
+                store.save_v2_position_exit_state(state)
+                instrument=client.get_tradable_instrument(inst)
+                tick=Decimal(str(instrument["tickSize"]))
+                close_side="sell" if side=="LONG" else "buy"
+                rounding=ROUND_FLOOR if close_side=="sell" else ROUND_CEILING
+                limit_price=(mark/tick).to_integral_value(rounding=rounding)*tick
+                receipt=client.place_limit_exit_reduce_only(inst_id=inst,limit_price=format(limit_price,"f"),
+                    client_order_id=cid,position_id=pid)
+                state.update(time_exit_receipt=receipt)
+                store.save_v2_position_exit_state(state)
+                results.append({"position_id":pid,"status":"TIME_EXIT_SUBMITTED","limit_price":format(limit_price,"f")})
+            else:
+                store.save_v2_position_exit_state(state)
+                results.append({"position_id":pid,"status":"MONITORED","candles_elapsed":state["candles_elapsed"]})
+        except Exception as exc:
+            results.append({"position_id":pid or "UNKNOWN","status":"EXIT_MANAGEMENT_ERROR","error_type":type(exc).__name__})
     return {"positions_checked":len(states),"results":results}
 
 
@@ -362,16 +406,16 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             if trading_active and approved and str(safe.get("signal") or "").upper() in {"LONG","SHORT"}:
                 inst=str(result.get("instrument_id") or result.get("inst_id") or symbol).upper()
                 execution=executor.execute(result,inst_id=inst,allow_demo_orders=True,
-                    leverage=int(env.get("CHALLENGE_1_V2_LEVERAGE","1")))
+                    leverage=int(env.get("CHALLENGE_1_V2_LEVERAGE","2")))
                 entry_state = _persist_entry_state(client,executor.store,execution,result,
                     now_ms=int(datetime.now(timezone.utc).timestamp()*1000))
                 if notifier is not None:
                     notifier.notify_async(
                         f"challenge1-v2:entry:{entry_state['position_id']}",
-                        f"🚀 معامله جدید تأیید شد: {inst}\\nجهت: {entry_state['side']}\\n"
-                        f"قیمت ورود: {entry_state['entry_price']}\\nحد ضرر SL: {entry_state['initial_stop_loss']}\\n"
-                        f"هدف اول TP1: {format((Decimal(entry_state['entry_price']) + (Decimal(entry_state['entry_price']) - Decimal(entry_state['initial_stop_loss'])) * Decimal('1.2') if entry_state['side'] == 'LONG' else Decimal(entry_state['entry_price']) - (Decimal(entry_state['initial_stop_loss']) - Decimal(entry_state['entry_price'])) * Decimal('1.2')).normalize(), 'f')}\\n"
-                        f"شناسه موقعیت: {entry_state['position_id']}\\nسفارش حفاظتی SL: فعال و تأییدشده",
+                        f"🚀 معامله جدید تأیید شد: {inst}\nجهت: {entry_state['side']}\n"
+                        f"قیمت ورود: {entry_state['entry_price']}\nحد ضرر SL: {entry_state['initial_stop_loss']}\n"
+                        f"هدف اول TP1: {format((Decimal(entry_state['entry_price']) + (Decimal(entry_state['entry_price']) - Decimal(entry_state['initial_stop_loss'])) * Decimal('1.2') if entry_state['side'] == 'LONG' else Decimal(entry_state['entry_price']) - (Decimal(entry_state['initial_stop_loss']) - Decimal(entry_state['entry_price'])) * Decimal('1.2')).normalize(), 'f')}\n"
+                        f"شناسه موقعیت: {entry_state['position_id']}\nسفارش حفاظتی SL: فعال و تأییدشده",
                     )
                 safe.update(execution_result=dict(execution),orders_submitted=True,mode="DEMO_AUTOPILOT")
             elif trading_active and not manage_only:
@@ -409,11 +453,12 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             "m15_rsi_alignment":"ADVISORY" if easy_demo_entry_mode else "STANDARD",
             "hard_safety_gates":["fresh_market_data","funding_freshness","spread_cap",
                 "atr_shock_cap","valid_stop_geometry","groq_signal_approval",
-                "isolated_margin","1x_leverage","full_size_exchange_sl",
+                "isolated_margin","isolated_max_3x","full_size_exchange_sl",
                 "four_position_capacity","same_candle_idempotency"],
         },
-        "risk_policy":{"risk_per_trade_pct":0.005,"max_aggregate_risk_pct":0.005,
-            "daily_loss_limit_pct":0.01,"max_margin_usage_pct":0.10,"leverage":1},
+        "risk_policy":{"risk_per_trade_pct":0.0025,"max_aggregate_risk_pct":0.01,
+            "daily_loss_limit_pct":0.02,"max_margin_usage_pct":0.25,"leverage":2,
+            "max_concurrent_positions":4,"min_reward_risk":1.4},
         "tpsl_verified":trading_active,"exit_manager":exit_summary,
         "ai_reviews_performed":any(bool(row.get("ai_reviews")) for row in rows),
         "ai_model_policy":{"provider":"Groq","primary_model":GROQ_DEFAULT_MODEL,
