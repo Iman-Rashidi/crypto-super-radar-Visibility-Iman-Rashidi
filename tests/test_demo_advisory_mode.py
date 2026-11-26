@@ -80,15 +80,6 @@ class DemoAdvisorySupervisorTests(unittest.TestCase):
         self.assertTrue(result["ai_consensus"]["groq_vetoed"])
         self.assertFalse(result["ai_consensus"]["groq_approval_positive"])
 
-    def test_demo_advisory_does_not_override_invalid_wave_technical_gate(self):
-        result = self._run(
-            _groq_review("VETO"),
-            analysis=_analysis(phase="WAVE_2_UNCONFIRMED", pattern="BULLISH"),
-        )
-        self.assertFalse(result["approved"])
-        self.assertFalse(result["ai_consensus"]["technical_approved"])
-        self.assertTrue(result["ai_consensus"]["demo_advisory_mode"])
-
     def test_live_flag_disables_demo_advisory_override(self):
         result = self._run(_groq_review("VETO"), live="true")
         self.assertFalse(result["approved"])
@@ -136,23 +127,6 @@ class DemoAdvisoryExecutorTests(unittest.TestCase):
                    return_value=True):
             ready, reason = _challenge1_two_reviewer_approval_ready(self._record())
         self.assertTrue(ready, reason)
-
-    def test_executor_rejects_invalid_wave_in_demo_advisory_mode(self):
-        record = self._record()
-        record["challenge1_v2_evidence"]["elliott_wave"]["phase"] = "WAVE_2_UNCONFIRMED"
-        env = {
-            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
-            "BLOFIN_DEMO_TRADING_ENABLED": "true",
-            "BLOFIN_LIVE_ENABLED": "false",
-        }
-        with patch.dict(os.environ, env, clear=False), \
-             patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
-                   return_value=(True, "valid")), \
-             patch("crypto_super_radar.blofin_demo_executor._v2_elliott_entry_gate_allows",
-                   wraps=__import__("crypto_super_radar.blofin_demo_executor", fromlist=["_v2_elliott_entry_gate_allows"])._v2_elliott_entry_gate_allows):
-            ready, reason = _challenge1_two_reviewer_approval_ready(record)
-        self.assertFalse(ready)
-        self.assertIn("Elliott", reason)
 
     def test_executor_rejects_signal_id_mismatch_in_advisory_mode(self):
         record = self._record()

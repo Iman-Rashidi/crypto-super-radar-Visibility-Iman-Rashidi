@@ -170,17 +170,8 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
     }
     expected_direction = "BULLISH" if side == "LONG" else "BEARISH" if side == "SHORT" else ""
-    demo_advisory_mode = (
-        execution_profile == "CHALLENGE_1_V2"
-        and str(os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "")).strip().lower() == "true"
-        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "")).strip().lower() == "true"
-        and str(os.getenv("BLOFIN_LIVE_ENABLED", "")).strip().lower() != "true"
-    )
     if execution_profile == "CHALLENGE_1_V2":
-        # Groq is advisory in Demo, but the technical Elliott gate remains strict.
-        wave_gate_ready = _v2_elliott_entry_gate_allows(
-            side, wave, easy_demo_entry=False if demo_advisory_mode else None
-        )
+        wave_gate_ready = _v2_elliott_entry_gate_allows(side, wave)
     else:
         wave_gate_ready = (
             side in {"LONG", "SHORT"}
@@ -212,19 +203,23 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     if approval_age < -30 or approval_age > 300:
         return False, "The reviewer approval is outside the five-minute validity window."
 
-    wave_technical_approved_for_executor = (
-        wave_phase in allowed_phases
-        and wave_direction == expected_direction
-    )
     technical_approved_for_executor = (
         side in {"LONG", "SHORT"}
         and (
-            wave_technical_approved_for_executor
-            if demo_advisory_mode
-            else (easy_demo_entry or wave_technical_approved_for_executor)
+            easy_demo_entry
+            or (
+                wave_phase in allowed_phases
+                and wave_direction == expected_direction
+            )
         )
     )
 
+    demo_advisory_mode = (
+        execution_profile == "CHALLENGE_1_V2"
+        and str(os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_LIVE_ENABLED", "")).strip().lower() != "true"
+    )
     if demo_advisory_mode:
         advisory_ready = (
             consensus.get("demo_advisory_mode") is True

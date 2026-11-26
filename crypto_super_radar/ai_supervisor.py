@@ -386,13 +386,18 @@ def run_challenge1_v2_supervisor_reviews(
     )
     # Advisory mode changes only Groq's authority. It does not relax the
     # signal-bound technical wave gate or any downstream execution controls.
+    wave_technical_approved = (
+        expected_wave_phase in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+    )
+    # Advisory mode changes only Groq's authority. Easy Demo's pre-existing
+    # Elliott relaxation remains bounded by the Executor's V2 evidence gate.
     technical_approved = (
         expected_side in {"LONG", "SHORT"}
-        and (
-            wave_technical_approved
-            if demo_advisory_mode
-            else (easy_demo_entry or wave_technical_approved)
-        )
+        and (easy_demo_entry or wave_technical_approved)
     )
 
     reviewed_signal_id = str(signal_id or "").strip()
