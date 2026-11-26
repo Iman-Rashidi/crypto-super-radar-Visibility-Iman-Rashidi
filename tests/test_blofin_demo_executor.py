@@ -1629,32 +1629,35 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
 
 
-    def test_confirmed_closed_position_allows_only_bounded_quantity_rounding(self):
-        def create_order(pid, signal_id):
-            challenge = signal_record(signal_id=signal_id)
-            experience_id = self.store.record_challenge1_decision(
-                instrument_id="BTC-USDT", challenge_record=challenge,
-            )
-            plan = build_demo_order_plan(
-                challenge, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
-            )
-            plan["experience_id"] = experience_id
-            self.assertTrue(self.store.reserve_order(plan))
-            self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="rounding-" + pid)
-            self.assertTrue(self.store.attach_position_id(experience_id, pid))
-            self.store._db.execute(
-                "UPDATE blofin_demo_orders SET entry_price=?, quantity=? WHERE client_order_id=?",
-                ("100", "100", plan["client_order_id"]),
-            )
-            opened_ms = int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000 + 5000
-            return plan, {
-                "historyId": "closed-" + pid, "positionId": pid, "instId": "BTC-USDT",
-                "positionSide": "net", "createTime": str(opened_ms),
-                "openAveragePrice": "100", "closeAveragePrice": "101",
-                "closePositions": "99.6", "maxPositions": "100", "realizedPnl": "1.25",
-            }
+    def _create_confirmed_closed_rounding_order(self, position_id):
+        challenge = signal_record(signal_id="rounding-" + position_id)
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT", challenge_record=challenge,
+        )
+        plan = build_demo_order_plan(
+            challenge, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(
+            plan["client_order_id"], "FILLED", exchange_order_id="rounding-" + position_id,
+        )
+        self.assertTrue(self.store.attach_position_id(experience_id, position_id))
+        self.store._db.execute(
+            "UPDATE blofin_demo_orders SET entry_price=?, quantity=? WHERE client_order_id=?",
+            ("100", "100", plan["client_order_id"]),
+        )
+        opened_ms = int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000 + 5000
+        history = {
+            "historyId": "closed-" + position_id, "positionId": position_id,
+            "instId": "BTC-USDT", "positionSide": "net", "createTime": str(opened_ms),
+            "openAveragePrice": "100", "closeAveragePrice": "101",
+            "closePositions": "99.6", "maxPositions": "100", "realizedPnl": "1.25",
+        }
+        return plan, history
 
-        plan, history = create_order("rounding-pass", "rounding-pass")
+    def test_confirmed_closed_position_allows_bounded_quantity_rounding(self):
+        plan, history = self._create_confirmed_closed_rounding_order("rounding-pass")
         accepted = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT", history_rows=[history],
             client_order_id=plan["client_order_id"], position_id="rounding-pass",
@@ -1667,7 +1670,8 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         accepted_evidence = accepted_experience["events"][-1]["payload"]["evidence"]
         self.assertEqual(accepted_evidence["quantity_tolerance"], "0.500")
 
-        plan, history = create_order("rounding-fail", "rounding-fail")
+    def test_confirmed_closed_position_rejects_quantity_difference_above_tolerance(self):
+        plan, history = self._create_confirmed_closed_rounding_order("rounding-fail")
         history["closePositions"] = "99.4"
         rejected = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT", history_rows=[history],
