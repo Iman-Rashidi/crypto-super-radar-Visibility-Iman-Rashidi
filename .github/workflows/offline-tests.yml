@@ -162,3 +162,5 @@ jobs:
           PY
 
 # Manual Staging CI retrigger: rebuild the Render source archive for the current Staging tree.
+
+# 2026-11-26: retrigger offline regression after advisory-only supervisor and exit-manager wiring.
