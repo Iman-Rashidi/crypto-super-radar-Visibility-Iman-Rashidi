@@ -84,7 +84,9 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
             pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ", buy_volume_share_pct=90)))
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
-            pump_phase_fa="🟡 فاز ۲: میانه موج صعودی", buy_volume_share_pct=51.99)))\n        self.assertTrue(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="MOMENTUM_BUILD", buy_volume_share_pct=52)))\n        self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="DISTRIBUTION", buy_volume_share_pct=99)))
+            pump_phase_fa="🟡 فاز ۲: میانه موج صعودی", buy_volume_share_pct=51.99)))
+        self.assertTrue(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="MOMENTUM_BUILD", buy_volume_share_pct=52)))
+        self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="DISTRIBUTION", buy_volume_share_pct=99)))
 
 
     def test_profit_milestones_are_sent_once_and_deduplicated_per_level(self):
