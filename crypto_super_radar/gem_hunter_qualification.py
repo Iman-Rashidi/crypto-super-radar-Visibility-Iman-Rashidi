@@ -33,6 +33,33 @@ FILTER_IDS = (
 )
 CRITICAL_GATES = ("security", "liquidity", "data_quality", "exit")
 
+EARLY_IGNITION = "EARLY_IGNITION"
+MOMENTUM_BUILD = "MOMENTUM_BUILD"
+LATE_MOMENTUM = "LATE_MOMENTUM"
+DISTRIBUTION = "DISTRIBUTION"
+EARLY_PHASE_CODES = frozenset({EARLY_IGNITION, MOMENTUM_BUILD})
+
+
+def normalize_pump_phase(value: Any) -> str:
+    """Map stable IDs and legacy Persian/English labels to canonical phase IDs."""
+    if isinstance(value, Mapping):
+        value = value.get("code") or value.get("phase_code") or value.get("pump_phase_code") or value.get("label")
+    raw = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    if not raw:
+        return "UNKNOWN"
+    if raw.upper() in {EARLY_IGNITION, MOMENTUM_BUILD, LATE_MOMENTUM, DISTRIBUTION}:
+        return raw.upper()
+    if any(x in raw for x in ("distribution", "phase 3", "فاز ۳", "فاز 3", "خطر دامپ", "سقف فرسودگی")):
+        return DISTRIBUTION
+    if any(x in raw for x in ("late momentum", "late_momentum", "فاز ۲.۵")):
+        return LATE_MOMENTUM
+    if any(x in raw for x in ("momentum build", "momentum_build", "phase 2", "فاز ۲", "فاز 2", "میانه موج صعودی", "ادامه صعود سالم")):
+        return MOMENTUM_BUILD
+    if any(x in raw for x in ("early ignition", "early_ignition", "phase 1", "فاز ۱", "فاز 1", "شروع پامپ", "شروع موج", "انباشت")):
+        return EARLY_IGNITION
+    return "UNKNOWN"
+
+
 
 def _finite_number(value: Any) -> Optional[float]:
     try:
@@ -287,22 +314,23 @@ def public_buy_candidates(candidates: Any, *, limit: int = 20,
     return qualified[:limit]
 
 
-EARLY_WAVE_PHASE_MARKERS = ("فاز ۱", "فاز ۲", "فاز 1", "فاز 2", "phase 1", "phase 2", "انباشت", "شروع موج", "ادامه صعود سالم", "میانه موج صعودی", "early ignition")
-
 def research_qualification_status(candidate: Any) -> str:
     """Research-only eligibility; this never grants trade authorization."""
     if not isinstance(candidate, Mapping):
         return "WATCH_ONLY_HIGH_RISK"
     pump = candidate.get("pump_dump_analysis") or {}
-    phase = str(candidate.get("pump_phase_fa") or pump.get("pump_phase_fa") or candidate.get("pump_phase") or "").lower()
+    phase_value = (candidate.get("pump_phase_code") or pump.get("pump_phase_code")
+                   or candidate.get("pump_phase_fa") or pump.get("pump_phase_fa")
+                   or candidate.get("pump_phase"))
+    phase_code = normalize_pump_phase(phase_value)
     risk_value = candidate.get("risk_score")
     if risk_value is None:
         risk_value = (candidate.get("qualification") or {}).get("risk_score")
     risk = _finite_number(risk_value)
     security = candidate.get("security_evidence") or {}
     security_status = str(security.get("status") or candidate.get("security_status") or "").upper()
-    phase3 = any(x in phase for x in ("فاز ۳", "فاز 3", "phase 3", "خطر دامپ", "سقف فرسودگی"))
-    early = any(x in phase for x in EARLY_WAVE_PHASE_MARKERS)
+    phase3 = phase_code == DISTRIBUTION
+    early = phase_code in EARLY_PHASE_CODES
     if phase3 or (risk is not None and risk > 75) or security_status == "FAIL":
         return "WATCH_ONLY_HIGH_RISK"
     if early and risk is not None and risk <= 70 and security_status in {"PASS", "UNKNOWN", ""}:

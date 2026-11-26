@@ -1,13 +1,14 @@
 """Offline tests for the permanent €100 Gem Hunter watchlist ledger."""
 import sqlite3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from datetime import datetime, timezone
 
 from crypto_super_radar.gem_hunter_watchlist import (
     ensure_watchlist_schema, record_watchlist_candidates, refresh_watchlist_prices,
     watchlist_snapshot, is_watchlist_eligible, send_watchlist_profit_alerts,
 )
-from crypto_super_radar.telegram_notifier import TARGET_CHAT_ID
+from crypto_super_radar.telegram_notifier import TARGET_CHAT_ID\nfrom crypto_super_radar.gem_hunter_qualification import normalize_pump_phase
 
 class WatchlistLedgerTests(unittest.TestCase):
     def setUp(self):
@@ -82,7 +83,7 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
             pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ", buy_volume_share_pct=90)))
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
-            pump_phase_fa="🟡 فاز ۲: میانه موج صعودی", buy_volume_share_pct=51.99)))
+            pump_phase_fa="🟡 فاز ۲: میانه موج صعودی", buy_volume_share_pct=51.99)))\n        self.assertTrue(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="MOMENTUM_BUILD", buy_volume_share_pct=52)))\n        self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW", pump_phase_code="DISTRIBUTION", buy_volume_share_pct=99)))
 
 
     def test_profit_milestones_are_sent_once_and_deduplicated_per_level(self):
@@ -155,6 +156,92 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertEqual(retry["duplicates"], 1)
         retry_client.post.assert_not_called()
 
+
+
+    def test_phase_mapping_is_stable_and_legacy_safe(self):
+        self.assertEqual(normalize_pump_phase("🟢 فاز ۱: شروع پامپ (Early Ignition)"), "EARLY_IGNITION")
+        self.assertEqual(normalize_pump_phase("🟡 فاز ۲: میانه موج صعودی"), "MOMENTUM_BUILD")
+        self.assertEqual(normalize_pump_phase("🔴 فاز ۳: خطر دامپ"), "DISTRIBUTION")
+        self.assertEqual(normalize_pump_phase({"pump_phase_code":"EARLY_IGNITION"}), "EARLY_IGNITION")
+        self.assertEqual(normalize_pump_phase("unrecognised"), "UNKNOWN")
+
+    def test_legacy_schema_migration_is_idempotent_and_preserves_history(self):
+        legacy = sqlite3.connect(":memory:")
+        legacy.row_factory = sqlite3.Row
+        legacy.execute("""CREATE TABLE gem_hunter_watchlist_ledger (
+            token_id TEXT PRIMARY KEY, first_detected_utc TEXT NOT NULL, token_name TEXT NOT NULL,
+            token_symbol TEXT NOT NULL, chain TEXT NOT NULL, token_address TEXT NOT NULL, category_fa TEXT,
+            initial_price_usd REAL NOT NULL, latest_price_usd REAL NOT NULL, peak_price_usd REAL NOT NULL,
+            detection_count INTEGER NOT NULL DEFAULT 1, last_seen_utc TEXT NOT NULL, price_updated_utc TEXT)""")
+        legacy.execute("""INSERT INTO gem_hunter_watchlist_ledger VALUES
+            ('solana:MintABC','2026-01-01T00:00:00Z','Alpha','ALP','solana','MintABC','x',0.01,0.02,0.03,4,'2026-01-02T00:00:00Z',NULL)""")
+        ensure_watchlist_schema(legacy)
+        ensure_watchlist_schema(legacy)
+        row = dict(legacy.execute("SELECT * FROM gem_hunter_watchlist_ledger").fetchone())
+        self.assertEqual((row["initial_price_usd"],row["peak_price_usd"],row["detection_count"]),(0.01,0.03,4))
+        self.assertEqual((row["status"],row["price_status"]),("ACTIVE","UNKNOWN"))
+        legacy.close()
+
+    def test_active_cap_archives_oldest_and_preserves_rows(self):
+        rows=[self.candidate(token_address=f"Mint{i}",token_symbol=f"A{i}") for i in range(251)]
+        record_watchlist_candidates(self.db,rows)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM gem_hunter_watchlist_ledger WHERE status='ACTIVE'").fetchone()[0],250)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM gem_hunter_watchlist_ledger WHERE status='ARCHIVED'").fetchone()[0],1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM gem_hunter_watchlist_ledger").fetchone()[0],251)
+
+    def test_auto_prune_archives_old_or_low_liquidity(self):
+        record_watchlist_candidates(self.db,[self.candidate(token_address="OldMint",liquidity_usd=9000,volume_24h_usd=5000),
+            self.candidate(token_address="ThinMint",liquidity_usd=9000,volume_24h_usd=5000)])
+        with self.db:
+            self.db.execute("UPDATE gem_hunter_watchlist_ledger SET last_seen_utc='2026-01-01T00:00:00Z' WHERE token_id='solana:OldMint'")
+            self.db.execute("UPDATE gem_hunter_watchlist_ledger SET liquidity_usd=4999 WHERE token_id='solana:ThinMint'")
+        result=auto_prune_watchlist(self.db,now=datetime(2026,11,26,tzinfo=timezone.utc))
+        self.assertEqual(result["archived_stale"],1)
+        self.assertEqual(result["archived_unsafe"],1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM gem_hunter_watchlist_ledger WHERE status='ARCHIVED'").fetchone()[0],2)
+
+    def test_dexscreener_retry_then_stale_after_three_failures(self):
+        record_watchlist_candidates(self.db,[self.candidate()])
+        client=Mock()
+        client.get.side_effect=[RuntimeError("429"),RuntimeError("503"),RuntimeError("timeout")]
+        with patch("crypto_super_radar.gem_hunter_watchlist.time.sleep") as sleeper:
+            result=refresh_watchlist_prices(self.db,session=client,backoff_base_seconds=0.01)
+        self.assertEqual(client.get.call_count,3)
+        self.assertEqual(sleeper.call_count,2)
+        self.assertEqual(result["retry_attempts"],3)
+        self.assertEqual(result["stale_tokens"],1)
+        self.assertEqual(self.db.execute("SELECT price_status FROM gem_hunter_watchlist_ledger").fetchone()[0],"STALE")
+
+
+    def test_dexscreener_retries_then_recovers_with_exponential_backoff(self):
+        record_watchlist_candidates(self.db,[self.candidate()])
+        class GoodResponse:
+            def raise_for_status(self): return None
+            def json(self):
+                return {"pairs":[{"chainId":"solana","baseToken":{"address":"MintABC"},
+                    "priceUsd":"0.02","liquidity":{"usd":10000},"volume":{"h24":5000}}]}
+        client=Mock()
+        client.get.side_effect=[RuntimeError("429"),RuntimeError("503"),GoodResponse()]
+        with patch("crypto_super_radar.gem_hunter_watchlist.time.sleep") as sleeper:
+            result=refresh_watchlist_prices(self.db,session=client,backoff_base_seconds=0.1)
+        self.assertEqual(client.get.call_count,3)
+        self.assertEqual([call.args[0] for call in sleeper.call_args_list],[0.1,0.2])
+        self.assertEqual(result["prices_updated"],1)
+        self.assertEqual(result["retry_attempts"],3)
+        self.assertEqual(self.db.execute("SELECT price_status FROM gem_hunter_watchlist_ledger").fetchone()[0],"OK")
+
+    def test_drawdown_alert_is_deduplicated_at_thirty_percent_below_peak(self):
+        record_watchlist_candidates(self.db,[self.candidate(price_usd=0.02)])
+        with self.db:
+            self.db.execute("UPDATE gem_hunter_watchlist_ledger SET peak_price_usd=0.02,latest_price_usd=0.014 WHERE token_id='solana:MintABC'")
+        client=self.telegram_client(send_responses=1)
+        first=send_watchlist_profit_alerts(self.db,session=client,bot_token="bot-token")
+        second=send_watchlist_profit_alerts(self.db,session=client,bot_token="bot-token")
+        self.assertEqual(first["sent"],1)
+        self.assertEqual(second["duplicates"],1)
+        self.assertEqual(client.post.call_count,2)
+        self.assertIn("هشدار افت از سقف",client.post.call_args_list[1].kwargs["json"]["text"])
+        self.assertEqual(self.db.execute("SELECT threshold_pct FROM gem_hunter_watchlist_profit_alerts").fetchone()[0],-30)
 
     def test_phase_three_risk_95_never_enters_eur_100_watchlist(self):
         item=self.candidate(pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ",risk_score=95,

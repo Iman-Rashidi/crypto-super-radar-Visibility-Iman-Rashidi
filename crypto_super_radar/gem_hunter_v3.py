@@ -14,7 +14,7 @@ from typing import Any, Mapping, Optional
 import requests
 
 from .database import connect_database, storage_backend
-from .gem_hunter_qualification import research_qualification_status
+from .gem_hunter_qualification import normalize_pump_phase, research_qualification_status
 
 
 SCHEMA_VERSION = "gem-hunter-v3"
@@ -318,6 +318,7 @@ def analyze_pump_dump_phase(candidate: Mapping[str, Any], *, now: Optional[datet
     return {
         "category_fa": "🐸 میم‌کوین پامپی (نوسان کوتاه‌مدت)" if meme else "💎 آلت‌کوین / پروژه جدید (نگهداری میان‌مدت)",
         "pump_phase_fa": phase,
+        "pump_phase_code": normalize_pump_phase(phase),
         "pump_start_price_usd": start_price,
         "pump_start_price_basis": "ESTIMATED_FROM_PRICE_CHANGE_1H_NOT_VERIFIED_LOW" if start_price is not None else "NOT_AVAILABLE",
         "pump_window_summary_fa": window,
@@ -677,14 +678,15 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
             or research_qualification_status(candidate) != "QUALIFIED_EARLY_WAVE"):
         return {"status": "SKIPPED", "reason": "Candidate is not in an eligible Telegram research tier."}
     if status == "EARLY_ALPHA_REVIEW":
-        phase = candidate.get("pump_phase_fa") or (candidate.get("pump_dump_analysis") or {}).get("pump_phase_fa")
+        phase = (candidate.get("pump_phase_code") or (candidate.get("pump_dump_analysis") or {}).get("pump_phase_code")
+                 or candidate.get("pump_phase_fa") or (candidate.get("pump_dump_analysis") or {}).get("pump_phase_fa"))
         buy_share = _finite(candidate.get("buy_volume_share_pct"))
         if buy_share is None:
             trades = candidate.get("pool_trade_evidence") or {}
             buy, sell = _finite(trades.get("buy_volume_usd")), _finite(trades.get("sell_volume_usd"))
             if buy is not None and sell is not None and buy + sell > 0:
                 buy_share = 100.0 * buy / (buy + sell)
-        if phase not in {"🟢 فاز ۱: شروع پامپ (Early Ignition)", "🟡 فاز ۲: میانه موج صعودی"} or buy_share is None or buy_share < 52.0:
+        if normalize_pump_phase(phase) not in {"EARLY_IGNITION", "MOMENTUM_BUILD"} or buy_share is None or buy_share < 52.0:
             return {"status": "SKIPPED", "reason": "EARLY_ALPHA_REVIEW alert requires bullish phase 1/2 and buy-volume share >=52%."}
 
     security = candidate.get("security_evidence") or {}
