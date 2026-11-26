@@ -10,15 +10,15 @@ from crypto_super_radar.ai_supervisor import run_challenge1_v2_supervisor_review
 from crypto_super_radar.blofin_demo_executor import _challenge1_two_reviewer_approval_ready
 
 
-def _analysis():
+def _analysis(phase="WAVE_3_CONFIRMED", pattern="BULLISH"):
     return SimpleNamespace(
         signal=SimpleNamespace(value="LONG"),
         metrics={
             "execution_profile": "CHALLENGE_1_V2",
             "challenge1_v2_evidence": {
                 "elliott_wave": {
-                    "phase": "WAVE_3_CONFIRMED",
-                    "pattern": "BULLISH",
+                    "phase": phase,
+                    "pattern": pattern,
                 }
             },
         },
@@ -46,7 +46,7 @@ def _groq_review(status="APPROVED", **overrides):
 
 
 class DemoAdvisorySupervisorTests(unittest.TestCase):
-    def _run(self, review, live="false"):
+    def _run(self, review, live="false", analysis=None):
         env = {
             "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
             "BLOFIN_DEMO_TRADING_ENABLED": "true",
@@ -54,7 +54,7 @@ class DemoAdvisorySupervisorTests(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=False):
             return run_challenge1_v2_supervisor_reviews(
-                _analysis(), "BTC-USDT", signal_id="signal-demo-001",
+                analysis or _analysis(), "BTC-USDT", signal_id="signal-demo-001",
                 second_reviewer=lambda *args, **kwargs: review,
             )
 
@@ -79,6 +79,15 @@ class DemoAdvisorySupervisorTests(unittest.TestCase):
         self.assertTrue(result["approved"])
         self.assertTrue(result["ai_consensus"]["groq_vetoed"])
         self.assertFalse(result["ai_consensus"]["groq_approval_positive"])
+
+    def test_demo_advisory_does_not_override_invalid_wave_technical_gate(self):
+        result = self._run(
+            _groq_review("VETO"),
+            analysis=_analysis(phase="WAVE_2_UNCONFIRMED", pattern="BULLISH"),
+        )
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["ai_consensus"]["technical_approved"])
+        self.assertTrue(result["ai_consensus"]["demo_advisory_mode"])
 
     def test_live_flag_disables_demo_advisory_override(self):
         result = self._run(_groq_review("VETO"), live="true")
@@ -127,6 +136,40 @@ class DemoAdvisoryExecutorTests(unittest.TestCase):
                    return_value=True):
             ready, reason = _challenge1_two_reviewer_approval_ready(self._record())
         self.assertTrue(ready, reason)
+
+    def test_executor_rejects_invalid_wave_in_demo_advisory_mode(self):
+        record = self._record()
+        record["challenge1_v2_evidence"]["elliott_wave"]["phase"] = "WAVE_2_UNCONFIRMED"
+        env = {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_LIVE_ENABLED": "false",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
+                   return_value=(True, "valid")), \
+             patch("crypto_super_radar.blofin_demo_executor._v2_elliott_entry_gate_allows",
+                   wraps=__import__("crypto_super_radar.blofin_demo_executor", fromlist=["_v2_elliott_entry_gate_allows"])._v2_elliott_entry_gate_allows):
+            ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertFalse(ready)
+        self.assertIn("Elliott", reason)
+
+    def test_executor_rejects_signal_id_mismatch_in_advisory_mode(self):
+        record = self._record()
+        record["ai_consensus"]["reviewed_signal_id"] = "different-signal"
+        env = {
+            "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_LIVE_ENABLED": "false",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
+                   return_value=(True, "valid")), \
+             patch("crypto_super_radar.blofin_demo_executor._v2_elliott_entry_gate_allows",
+                   return_value=True):
+            ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertFalse(ready)
+        self.assertIn("signal_id", reason)
 
     def test_executor_never_uses_advisory_override_when_live_flag_is_true(self):
         env = {

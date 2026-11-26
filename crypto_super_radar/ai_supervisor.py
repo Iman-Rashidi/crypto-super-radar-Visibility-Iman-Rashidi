@@ -377,17 +377,21 @@ def run_challenge1_v2_supervisor_reviews(
         and os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
         and os.getenv("BLOFIN_LIVE_ENABLED", "").strip().lower() != "true"
     )
+    wave_technical_approved = (
+        expected_wave_phase in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+    )
+    # Advisory mode changes only Groq's authority. It does not relax the
+    # signal-bound technical wave gate or any downstream execution controls.
     technical_approved = (
         expected_side in {"LONG", "SHORT"}
         and (
-            easy_demo_entry
-            or (
-                expected_wave_phase in {
-                    "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
-                    "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
-                }
-                and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
-            )
+            wave_technical_approved
+            if demo_advisory_mode
+            else (easy_demo_entry or wave_technical_approved)
         )
     )
 
