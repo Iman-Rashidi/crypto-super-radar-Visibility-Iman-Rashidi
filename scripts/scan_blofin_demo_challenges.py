@@ -46,7 +46,7 @@ def main() -> int:
     if args.output:
         path = Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(rendered + "\\n", encoding="utf-8")
+        path.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     return 0 if not report["errors"] else 2
 
