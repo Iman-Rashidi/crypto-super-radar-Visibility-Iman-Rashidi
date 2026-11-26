@@ -34,6 +34,7 @@ class DemoChallengeHunterTests(unittest.TestCase):
             self.now,
         )
         self.assertEqual(item.demo_only_status, "LIVE_REQUIREMENTS_FOUND")
+        self.assertTrue(item.demo_evidence)
         self.assertTrue(item.live_requirement_evidence)
 
     def test_unknown_text_fails_closed(self):
