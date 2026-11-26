@@ -491,6 +491,10 @@ def run_challenge1_v2_supervisor_reviews(
         reviewer_status = "APPROVED_BY_GROQ"
     elif raw_reviewer_status in {"VETO", "REJECT", "REJECTED"}:
         reviewer_status = "VETO"
+    elif provider_is_groq and model_is_groq_allowlisted and verified and (
+        raw_reviewer_status == "APPROVED" and (not wave_match or not side_match or not technical_approved)
+    ):
+        reviewer_status = "NOT_APPROVED"
     else:
         reviewer_status = "UNKNOWN"
 

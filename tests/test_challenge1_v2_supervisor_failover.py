@@ -119,7 +119,7 @@ class Challenge1V2SingleGroqReviewerTests(unittest.TestCase):
         review = {**valid_approval(), "elliott_wave_direction": "BEARISH"}
         result = self.invoke(review)
         self.assertFalse(result["approved"])
-        self.assertEqual(result["ai_consensus"]["status"], "UNKNOWN")
+        self.assertEqual(result["ai_consensus"]["status"], "NOT_APPROVED")
 
 
 class OpenRouterFreeFallbackChainTests(unittest.TestCase):
