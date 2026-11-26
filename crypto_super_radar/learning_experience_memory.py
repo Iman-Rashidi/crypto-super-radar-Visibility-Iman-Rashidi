@@ -889,6 +889,114 @@ class LearningExperienceMemory:
         }
 
 
+
+TRADE_AUTOPSY_CODES = {
+    "TRAILING_STOP_MISSING": "سود شناور قابل‌توجه به زیان تبدیل شد و حد سود متحرک فعال/ثبت نشده بود.",
+    "LATE_WAVE_ENTRY": "ورود در بخش پایانی موج انجام شد و فضای ادامه حرکت محدود بود.",
+    "TIGHT_STOP_WHIPSAW": "حد ضرر نسبت به نوسان بازار بیش از حد تنگ بود و حرکت برگشتی کوتاه آن را فعال کرد.",
+    "HIGHER_TF_CONFLICT": "جهت روند تایم‌فریم ۴ساعته با جهت معامله تعارض داشت.",
+    "FUNDING_CROWDING": "فاندینگ و ازدحام موقعیت‌ها در جهت معامله، ریسک برگشت را افزایش داده بود.",
+    "STRONG_TREND_HELD": "معامله سودده بود و شواهد روند قوی هم‌جهت تا خروج حفظ شد.",
+}
+
+
+def _autopsy_number(source, *keys):
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def classify_trade_autopsy(entry_snapshot, exit_snapshot, outcome, mfe_pct=0.0, mae_pct=0.0):
+    """Classify a completed trade; persist the returned object in outcome evidence."""
+    if not all(isinstance(item, Mapping) for item in (entry_snapshot, exit_snapshot, outcome)):
+        raise ExperienceMemoryError("snapshots and outcome must be mappings")
+    mfe, mae = _finite_pnl(mfe_pct), _finite_pnl(mae_pct)
+    if mfe < 0 or mae > 0:
+        raise ExperienceMemoryError("mfe_pct must be >= 0 and mae_pct must be <= 0")
+    side = str(entry_snapshot.get("side") or entry_snapshot.get("direction") or "").upper()
+    result = str(outcome.get("realized_result") or outcome.get("result") or "").upper()
+    pnl = _autopsy_number(outcome, "realized_net_pnl", "net_pnl_pct", "pnl_pct")
+    trend4h = str(entry_snapshot.get("trend_4h") or entry_snapshot.get("higher_tf_trend") or "").upper()
+    progress = _autopsy_number(entry_snapshot, "wave_progress_pct", "wave_position_pct")
+    phase = str(entry_snapshot.get("wave_phase") or entry_snapshot.get("elliott_phase") or "").upper()
+    funding = _autopsy_number(entry_snapshot, "funding_rate_pct", "funding_rate")
+    strength = str(exit_snapshot.get("trend_strength") or entry_snapshot.get("trend_strength") or "").upper()
+    direction = str(exit_snapshot.get("trend_direction") or entry_snapshot.get("trend_direction") or "").upper()
+    aligned = strength in {"STRONG", "VERY_STRONG"} and direction in (
+        {side, "BULLISH" if side in {"LONG", "BUY"} else "BEARISH"}
+    ) and side in {"LONG", "SHORT", "BUY", "SELL"}
+    code = None
+    if result == "LOSS" and mfe >= 1.0 and pnl is not None and pnl < 0 and exit_snapshot.get("trailing_stop_present") is False:
+        code = "TRAILING_STOP_MISSING"
+    elif (progress is not None and progress >= 80) or phase in {"WAVE_5", "WAVE_5_LATE", "ENDING_DIAGONAL", "LATE_WAVE"}:
+        code = "LATE_WAVE_ENTRY"
+    elif result == "LOSS" and (exit_snapshot.get("whipsaw") is True or (
+        _autopsy_number(exit_snapshot, "stop_distance_pct") is not None
+        and _autopsy_number(exit_snapshot, "stop_distance_pct") <= 0.25 and abs(mae) <= 0.35
+    )):
+        code = "TIGHT_STOP_WHIPSAW"
+    elif trend4h and side and ((side in {"LONG", "BUY"} and trend4h in {"DOWN", "BEARISH", "SHORT"}) or
+                               (side in {"SHORT", "SELL"} and trend4h in {"UP", "BULLISH", "LONG"})):
+        code = "HIGHER_TF_CONFLICT"
+    elif entry_snapshot.get("funding_crowded") is True or (
+        funding is not None and abs(funding) >= 0.08 and entry_snapshot.get("funding_aligned_with_position") is True
+    ):
+        code = "FUNDING_CROWDING"
+    elif result == "PROFIT" and aligned:
+        code = "STRONG_TREND_HELD"
+    return {
+        "diagnosis_code": code or "INSUFFICIENT_EVIDENCE",
+        "explanation_fa": TRADE_AUTOPSY_CODES.get(code, "شواهد کافی برای انتساب علت ریشه‌ای به الگوی استاندارد وجود ندارد."),
+        "mfe_pct": mfe, "mae_pct": mae, "realized_result": result or "UNKNOWN",
+        "evidence_version": "POST_TRADE_AUTOPSY_V1",
+    }
+
+
+def build_historical_context_for_prompt(experiences, symbol, lookback=20):
+    """Return a short prompt-safe summary from verified final outcomes only."""
+    target = str(symbol or "").strip().upper()
+    if not target:
+        return ""
+    if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback < 1:
+        raise ValueError("lookback must be a positive integer")
+    eligible = []
+    for exp in list(experiences or []):
+        if not isinstance(exp, Mapping) or not isinstance(exp.get("verification"), Mapping):
+            continue
+        if exp["verification"].get("status") != "PASS" or not isinstance(exp.get("events"), list):
+            continue
+        de = next((e for e in exp["events"] if isinstance(e, Mapping) and e.get("event_type") == "DECISION_RECORDED"), None)
+        oe = next((e for e in exp["events"] if isinstance(e, Mapping) and e.get("event_type") == "OUTCOME_LABELLED"), None)
+        if not de or not oe:
+            continue
+        decision, outcome = de.get("payload"), oe.get("payload")
+        if isinstance(decision, Mapping) and isinstance(outcome, Mapping) and outcome.get("final") is True:
+            if str(decision.get("symbol") or "").upper() == target:
+                eligible.append(outcome)
+    eligible = eligible[-lookback:]
+    if not eligible:
+        return ""
+    wins = sum(1 for item in eligible if item.get("realized_result") == "PROFIT"
+               and (_autopsy_number(item, "realized_net_pnl") or 0) > 0)
+    codes = []
+    for item in eligible:
+        evidence = item.get("evidence")
+        autopsy = evidence.get("post_trade_autopsy") if isinstance(evidence, Mapping) else None
+        code = autopsy.get("diagnosis_code") if isinstance(autopsy, Mapping) else None
+        if code in TRADE_AUTOPSY_CODES:
+            codes.append(code)
+    top = min(set(codes), key=lambda code: (-codes.count(code), code)) if codes else "NONE"
+    return f"SYMBOL={target}; VERIFIED_FINAL_SAMPLES={len(eligible)}; WIN_RATE_PCT={100.0*wins/len(eligible):.1f}; TOP_DIAGNOSIS={top}"
+
+
 __all__ = [
     "LearningExperienceMemory",
     "ExperienceMemoryError",
@@ -896,4 +1004,7 @@ __all__ = [
     "ExperienceIntegrityError",
     "ExperienceStateError",
     "ExperienceNotFoundError",
+    "TRADE_AUTOPSY_CODES",
+    "classify_trade_autopsy",
+    "build_historical_context_for_prompt",
 ]
