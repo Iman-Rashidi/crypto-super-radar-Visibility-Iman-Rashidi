@@ -8163,12 +8163,28 @@ class Handler(BaseHTTPRequestHandler):
                 const result=await response.json();
                 const messages={
                   CONNECTED_READ_ONLY:'اتصال Demo برقرار است؛ درخواست‌های این مسیر فقط GET هستند. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'.',
-                  NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
-                  AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
-                  CONNECTION_FAILED:'اتصال به BloFin Demo برقرار نشد؛ شبکه یا محدودیت IP را بررسی کن.',
-                  UNKNOWN:'نتیجه آزمون نامشخص است؛ آزمون را بعداً تکرار کن.'
+                  NOT_CONFIGURED:result.message_fa||'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
+                  AUTH_FAILED:result.message_fa||'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
+                  CONNECTION_FAILED:result.message_fa||'درخواست خواندن از BloFin کامل نشد.',
+                  UNKNOWN:result.message_fa||'نتیجه آزمون نامشخص است؛ جزئیات فنی ثبت شده است.'
                 };
-                status.textContent=messages[result.status]||messages.UNKNOWN;
+                const diagnosticLabels={
+                  PRIVATE_API_KEY_PERMISSION:'اعتبارسنجی API Key',
+                  PUBLIC_MARKET_TICKER:'دریافت داده بازار',
+                  PRIVATE_FUTURES_BALANCE:'خواندن موجودی Futures',
+                  PRIVATE_POSITIONS:'خواندن پوزیشن‌ها',
+                  PRIVATE_OPEN_ORDERS:'خواندن سفارش‌های باز'
+                };
+                const stateLabels={PASS:'موفق',FAIL:'ناموفق',IN_PROGRESS:'در حال اجرا',NOT_CHECKED:'بررسی‌نشده'};
+                const details=[];
+                if(result.failed_stage)details.push('مرحله ناموفق: '+(diagnosticLabels[result.failed_stage]||result.failed_stage));
+                if(result.http_status)details.push('HTTP: '+String(result.http_status));
+                if(result.error_type)details.push('نوع خطا: '+String(result.error_type));
+                if(result.cause_type)details.push('علت فنی: '+String(result.cause_type));
+                if(result.market_data)details.push('داده بازار: '+(stateLabels[result.market_data]||result.market_data));
+                if(result.private_api)details.push('API خصوصی: '+(stateLabels[result.private_api]||result.private_api));
+                if(result.api_key_permission)details.push('مجوز API Key: '+result.api_key_permission);
+                status.textContent=[messages[result.status]||result.message_fa||messages.UNKNOWN,...details].join(' · ');
                 safety.textContent='محیط: Demo · عملیات این مسیر: فقط خواندن (GET) · مجوز واقعی کلید: '+(result.api_key_permission||'نامشخص')+' · ارسال سفارش از این مسیر: غیرفعال';
               }catch(error){
                 status.textContent='دریافت نتیجه آزمون ممکن نشد؛ اتصال داشبورد را بررسی کن.';

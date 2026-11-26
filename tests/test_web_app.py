@@ -2297,6 +2297,49 @@ class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
                 payload=previous_payload, expires_at=previous_expiry
             )
 
+    def test_demo_connection_status_preserves_safe_failure_diagnostics(self):
+        class FakeHTTP403(web_app.BloFinDemoError):
+            status_code = 403
+
+        class FakeBloFinReadOnly:
+            def __init__(self, *, timeout):
+                self.timeout = timeout
+
+            def get_api_key_info(self):
+                return {"readOnly": 1}
+
+            def get_tickers(self, *, inst_id):
+                raise FakeHTTP403("sanitized test failure")
+
+        env = {
+            "BLOFIN_API_KEY": "test-unified-key",
+            "BLOFIN_API_SECRET": "test-unified-secret",
+            "BLOFIN_PASSPHRASE": "test-unified-passphrase",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+        }
+        previous_payload = web_app.BLOFIN_STATUS_CACHE.get("payload")
+        previous_expiry = web_app.BLOFIN_STATUS_CACHE.get("expires_at", 0.0)
+        try:
+            web_app.BLOFIN_STATUS_CACHE.update(payload=None, expires_at=0.0)
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(web_app, "BloFinDemoReadOnly", FakeBloFinReadOnly),
+            ):
+                result = web_app._blofin_demo_connection_status()
+            self.assertEqual(result["status"], "CONNECTION_FAILED")
+            self.assertEqual(result["failed_stage"], "PUBLIC_MARKET_TICKER")
+            self.assertEqual(result["http_status"], 403)
+            self.assertEqual(result["error_type"], "FakeHTTP403")
+            self.assertIn("HTTP 403", result["message_fa"])
+            self.assertFalse(result["orders_enabled"])
+            self.assertNotIn("test-unified-secret", json.dumps(result))
+        finally:
+            web_app.BLOFIN_STATUS_CACHE.update(
+                payload=previous_payload, expires_at=previous_expiry
+            )
+
 
 class BloFinUnifiedReadinessTests(unittest.TestCase):
     def test_unified_credential_source_is_reported_but_read_only_permission_stays_blocked(self):
