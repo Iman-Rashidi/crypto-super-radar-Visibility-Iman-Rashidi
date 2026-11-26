@@ -17,6 +17,8 @@ import requests
 
 from . import ai_second_opinion as _ai
 from .ai_second_opinion import GROQ_ALLOWED_MODELS, normalize_groq_model_id
+from .database import connect_database
+from .learning_experience_memory import LearningExperienceMemory, build_historical_context_for_prompt
 
 MIN_INDEPENDENT_APPROVALS = 2
 MAX_PROVIDER_CALLS_PER_UTC_DAY = 30
@@ -298,6 +300,53 @@ def _run_two_reviewer_challenge1_supervisor_reviews(
     }
 
 
+
+def _groq_historical_review_role(asset: Any, experiences: list[dict[str, Any]] | None = None) -> str:
+    """Attach only compact allow-listed symbol history to Groq's system-role prefix."""
+    symbol = str(getattr(asset, "raw", asset) or asset).strip().upper()
+    if symbol.startswith("PERP:"):
+        symbol = symbol[5:]
+    symbol = symbol[:32]
+    if not symbol:
+        return "SOLE AI SUPERVISOR"
+    rows = experiences
+    if rows is None:
+        connection = None
+        try:
+            connection = connect_database()
+            rows = LearningExperienceMemory(connection).recent_experiences(limit=20)
+        except Exception:
+            rows = []
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+    try:
+        context = build_historical_context_for_prompt(rows or [], symbol, lookback=20)
+    except Exception:
+        context = ""
+    if not context:
+        return "SOLE AI SUPERVISOR"
+    # Parse the helper's fixed schema and re-emit a compact, bounded vocabulary.
+    import re
+    sample = re.search(r"VERIFIED_FINAL_SAMPLES=(\\d+)", context)
+    win = re.search(r"WIN_RATE_PCT=(\\d+(?:\\.\\d+)?)", context)
+    diagnosis = re.search(r"TOP_DIAGNOSIS=([A-Z_]+)", context)
+    allowed_codes = {
+        "TRAILING_STOP_MISSING", "LATE_WAVE_ENTRY", "TIGHT_STOP_WHIPSAW",
+        "HIGHER_TF_CONFLICT", "FUNDING_CROWDING", "STRONG_TREND_HELD", "NONE",
+    }
+    code = diagnosis.group(1) if diagnosis else "NONE"
+    if code not in allowed_codes:
+        code = "NONE"
+    n = min(20, max(0, int(sample.group(1)))) if sample else 0
+    rate = min(100.0, max(0.0, float(win.group(1)))) if win else 0.0
+    return f"SOLE AI SUPERVISOR | HIST {symbol} N={n} W={rate:.1f}% TOP={code}"[:80]
+
+
 def run_challenge1_v2_supervisor_reviews(
     analysis: Any, asset: Any, *, signal_id: str | None = None,
     primary_reviewer: Callable[..., dict[str, Any]] | None = None,
@@ -379,7 +428,7 @@ def run_challenge1_v2_supervisor_reviews(
 
     try:
         groq = (second_reviewer or _ai.run_independent_ai_supervisor)(
-            analysis, asset, review_role="SOLE AI SUPERVISOR",
+            analysis, asset, review_role=_groq_historical_review_role(asset),
         )
     except Exception as exc:
         groq = unavailable(type(exc).__name__)
