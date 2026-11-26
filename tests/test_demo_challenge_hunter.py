@@ -33,7 +33,7 @@ class DemoChallengeHunterTests(unittest.TestCase):
             "Complete a Demo trade, deposit 100 USDT and make a live Futures trade.",
             self.now,
         )
-        self.assertEqual(item.demo_only_status, "NO_LIVE_REQUIREMENTS")
+        self.assertEqual(item.demo_only_status, "LIVE_REQUIREMENTS_FOUND")
         self.assertTrue(item.live_requirement_evidence)
 
     def test_unknown_text_fails_closed(self):
