@@ -20,9 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      BLOFIN_DEMO_API_KEY: ${{ secrets.BLOFIN_DEMO_API_KEY }}
-      BLOFIN_DEMO_API_SECRET: ${{ secrets.BLOFIN_DEMO_API_SECRET }}
-      BLOFIN_DEMO_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_PASSPHRASE }}
+      # Reuse the exact BloFin Demo trade secrets from the staging autopilot.
+      # Map them to the read-only adapter's supported environment variable names.
+      BLOFIN_DEMO_API_KEY: ${{ secrets.BLOFIN_DEMO_TRADE_API_KEY }}
+      BLOFIN_DEMO_API_SECRET: ${{ secrets.BLOFIN_DEMO_TRADE_API_SECRET }}
+      BLOFIN_DEMO_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_TRADE_PASSPHRASE }}
     steps:
       - name: Checkout staging branch
         uses: actions/checkout@v4
@@ -41,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/dump_position_history.py \
+          PYTHONPATH=. python scripts/dump_position_history.py \
             --map 1000000995117=BTC-USDT \
             --map 1000000995119=ETH-USDT \
             --map 1000000995121=SOL-USDT | tee position-history.json
