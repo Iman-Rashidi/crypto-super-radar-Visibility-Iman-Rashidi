@@ -517,6 +517,59 @@ def _persist_entry_state(client: Any, store: Any, execution: Mapping[str, Any],
     return store.save_v2_position_exit_state(state)
 
 
+def _blofin_api_error_kind(exc: BaseException) -> str | None:
+    """Return a category only for transient BloFin transport/HTTP failures."""
+    response = getattr(exc, "response", None)
+    raw_status = (
+        getattr(exc, "status_code", None)
+        or getattr(exc, "http_status", None)
+        or getattr(response, "status_code", None)
+    )
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status == 429:
+        return "HTTP_429"
+    if status is not None and 500 <= status <= 599:
+        return f"HTTP_{status}"
+    name = type(exc).__name__.casefold()
+    if "timeout" in name or "timedout" in name:
+        return "TIMEOUT"
+    if any(token in name for token in ("connectionerror", "connectionreset", "connectionaborted", "connecterror")):
+        return "NETWORK_CONNECTION"
+    return None
+
+
+def _api_error_streak(connection: Any) -> int:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS challenge1_v2_api_safety_state (
+            state_id INTEGER PRIMARY KEY CHECK(state_id=1),
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_failure_kind TEXT,
+            updated_at_utc TEXT NOT NULL
+        )"""
+    )
+    row = connection.execute(
+        "SELECT consecutive_failures FROM challenge1_v2_api_safety_state WHERE state_id=1"
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _save_api_error_streak(connection: Any, count: int, failure_kind: str | None) -> None:
+    connection.execute(
+        """INSERT INTO challenge1_v2_api_safety_state
+           (state_id, consecutive_failures, last_failure_kind, updated_at_utc)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT(state_id) DO UPDATE SET
+             consecutive_failures=excluded.consecutive_failures,
+             last_failure_kind=excluded.last_failure_kind,
+             updated_at_utc=excluded.updated_at_utc""",
+        (max(0, int(count)), failure_kind, _utc_now()),
+    )
+    connection.commit()
+
+
 def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str,...]=SYMBOLS,
               executor: Any | None=None, environ: Mapping[str,str] | None=None,
               notifier: Any | None=None) -> dict[str,Any]:
@@ -554,10 +607,27 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                 type(exc).__name__,
             )
             notifier = None
+    # Existing positions are managed before the entry circuit breaker is consulted.
     exit_summary=manage_open_positions(client,executor.store,notifier=notifier) if trading_active else {"positions_checked":0,"results":[]}
     rows=[]
+    api_error_count = _api_error_streak(connection)
+    safe_mode_active = False
+    last_api_error_kind = None
     manage_only=_enabled(env.get("CHALLENGE_1_V2_MANAGE_ONLY"))
     for symbol in symbols:
+        if safe_mode_active:
+            safe = {"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE",
+                "status":"SAFE_MODE_API_ERROR",
+                "reason":"Three consecutive BloFin API failures; new entries paused for this cycle",
+                "api_error_count":api_error_count,"api_error_kind":last_api_error_kind,
+                "orders_submitted":False,"mode":"SAFE_MODE",
+                "exit_manager_summary":exit_summary.get("results", [])}
+            finished_at=_utc_now()
+            persist_result(connection,cycle_id=cycle_id,symbol=symbol,result=safe,
+                started_at=started_at,finished_at=finished_at)
+            rows.append({"symbol":symbol,**safe})
+            continue
+        api_error_kind = None
         try:
             if manage_only:
                 result={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE",
@@ -565,6 +635,10 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             else:
                 result=analyzer(client,symbol)
             if not isinstance(result,Mapping): raise TypeError("V2 analyzer returned a non-mapping result")
+            # A successful analyzer response means the preceding API failure streak is broken.
+            api_error_count = 0
+            last_api_error_kind = None
+            _save_api_error_streak(connection, 0, None)
             safe=_safe_record(result)
             safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,
                 mode="MANAGEMENT_ONLY" if manage_only else "DRY_RUN",
@@ -575,11 +649,19 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                     entry_gate_policy="EASY_DEMO_ENTRY_STRICT_EXIT",
                 )
             consensus=safe.get("ai_consensus")
+            groq_review_rows = consensus.get("reviews") if isinstance(consensus, Mapping) else None
+            raw_groq_status = str(
+                (safe.get("ai_review") or {}).get("status")
+                if isinstance(safe.get("ai_review"), Mapping)
+                else consensus.get("reviewer_status") if isinstance(consensus, Mapping) else ""
+            ).strip().upper()
+            explicit_groq_veto = raw_groq_status in {"VETO", "REJECT", "REJECTED"}
             standard_approved = (
                 isinstance(consensus, Mapping)
                 and consensus.get("status") == "APPROVED_BY_GROQ"
                 and consensus.get("single_reviewer_approval") is True
                 and consensus.get("reviewer_id") == "groq"
+                and not explicit_groq_veto
             )
             # In explicitly enabled Demo advisory mode, Groq's vote is telemetry.
             # The technical reviewer must still approve this exact directional signal;
@@ -589,7 +671,9 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                 "APPROVED_WITH_GROQ_ADVISORY_VETO",
             }
             demo_advisory_approved = (
-                easy_demo_entry_mode
+                trading_active
+                and easy_demo_entry_mode
+                and _enabled(env.get("BLOFIN_DEMO_TRADING_ENABLED"))
                 and not _enabled(env.get("BLOFIN_LIVE_ENABLED"))
                 and isinstance(consensus, Mapping)
                 and consensus.get("status") in advisory_statuses
@@ -618,12 +702,22 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             elif trading_active and not manage_only:
                 safe["entry_skipped_reason"]="GROQ_APPROVAL_NOT_PRESENT"
         except Exception as exc:
+            # Only transient exchange/network failures count. NO_TRADE and data errors do not.
+            api_error_kind = _blofin_api_error_kind(exc)
+            if api_error_kind:
+                api_error_count += 1
+                last_api_error_kind = api_error_kind
+                _save_api_error_streak(connection, api_error_count, api_error_kind)
+                if api_error_count >= 3:
+                    safe_mode_active = True
             # Preserve a sanitized, actionable provider/data error in the audit record.
             # Known adapters already emit credential-free messages; never serialize headers or env.
             detail = " ".join(str(exc).split())[:240]
-            safe={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE","status":"DATA_BLOCKED",
+            safe={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE",
+                "status":"SAFE_MODE_API_ERROR" if safe_mode_active else ("API_ERROR" if api_error_kind else "DATA_BLOCKED"),
                 "reason":f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
-                "orders_submitted":False,"mode":"DRY_RUN"}
+                "api_error_kind":api_error_kind,"api_error_count":api_error_count,
+                "orders_submitted":False,"mode":"SAFE_MODE" if safe_mode_active else "DRY_RUN"}
             rejection = getattr(exc, "elliott_rejection_reason", None)
             snapshot = getattr(exc, "elliott_evidence_snapshot", None)
             if rejection:
@@ -647,6 +741,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
         "telegram_report_status":telegram_report_status,
         "mode":"DEMO_AUTOPILOT" if trading_active else "DRY_RUN","environment":"BLOFIN_DEMO",
         "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted,
+        "safe_mode_active":safe_mode_active,"api_error_count":api_error_count,
         "open_position_limit":4,"position_limit_enforced":trading_active,
         "entry_mode":"EASY_DEMO_ENTRY_STRICT_EXIT" if easy_demo_entry_mode else "STANDARD",
         "entry_gate_policy":{
