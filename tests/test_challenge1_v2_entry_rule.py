@@ -71,7 +71,7 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
         m15.iloc[-1, m15.columns.get_loc("volume")] = 1.0
         btc = candles(btc_index)
         regime = {
-            "status": "TREND", "direction": "LONG", "adx_1h": 25.0,
+            "status": "TREND", "direction": "LONG", "adx_1h": 25.0, "ema21_slope_1h": 0.1,
             "close_1h": 105.0, "ema21_1h": 100.0, "ema55_1h": 110.0,
             "ema200_1h": 90.0, "aligned_4h": False, "opposed_4h": True,
             "neutral_4h": True, "structure_aligned_1h": False,
