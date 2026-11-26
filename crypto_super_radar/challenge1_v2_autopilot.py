@@ -445,12 +445,31 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                     entry_gate_policy="EASY_DEMO_ENTRY_STRICT_EXIT",
                 )
             consensus=safe.get("ai_consensus")
-            approved = (
+            standard_approved = (
                 isinstance(consensus, Mapping)
                 and consensus.get("status") == "APPROVED_BY_GROQ"
                 and consensus.get("single_reviewer_approval") is True
                 and consensus.get("reviewer_id") == "groq"
             )
+            # In explicitly enabled Demo advisory mode, Groq's vote is telemetry.
+            # The technical reviewer must still approve this exact directional signal;
+            # the executor independently re-validates these bindings and Demo-only flags.
+            advisory_statuses = {
+                "APPROVED_WITH_GROQ_ADVISORY",
+                "APPROVED_WITH_GROQ_ADVISORY_VETO",
+            }
+            demo_advisory_approved = (
+                easy_demo_entry_mode
+                and not _enabled(env.get("BLOFIN_LIVE_ENABLED"))
+                and isinstance(consensus, Mapping)
+                and consensus.get("status") in advisory_statuses
+                and consensus.get("demo_advisory_mode") is True
+                and consensus.get("reviewer_approved") is True
+                and consensus.get("technical_approved") is True
+                and consensus.get("expected_side") == str(safe.get("signal") or "").upper()
+                and consensus.get("reviewed_signal_id") == safe.get("signal_id")
+            )
+            approved = standard_approved or demo_advisory_approved
             if trading_active and approved and str(safe.get("signal") or "").upper() in {"LONG","SHORT"}:
                 inst=str(result.get("instrument_id") or result.get("inst_id") or symbol).upper()
                 execution=executor.execute(result,inst_id=inst,allow_demo_orders=True,

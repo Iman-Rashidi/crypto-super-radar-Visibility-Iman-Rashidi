@@ -191,6 +191,49 @@ class FakeEntryExecutor:
 
 
 class Challenge1V2EntryIntegrationTests(unittest.TestCase):
+    def test_demo_advisory_statuses_pass_only_when_demo_advisory_mode_is_explicit(self):
+        for status in ("APPROVED_WITH_GROQ_ADVISORY", "APPROVED_WITH_GROQ_ADVISORY_VETO"):
+            with self.subTest(status=status):
+                db=sqlite3.connect(":memory:")
+                store=FakeStore({})
+                executor=FakeEntryExecutor(store)
+                exchange=FakeExchange(mark="100")
+                signal={"execution_profile":"CHALLENGE_1_V2","instrument_id":"BTC-USDT",
+                  "signal":"LONG","signal_id":"signal-demo-001","status":"SIGNAL_READY",
+                  "ai_consensus":{"status":status,"demo_advisory_mode":True,
+                    "reviewer_approved":True,"technical_approved":True,
+                    "expected_side":"LONG","reviewed_signal_id":"signal-demo-001"}}
+                env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true",
+                  "BLOFIN_DEMO_TRADING_ENABLED":"true",
+                  "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE":"true",
+                  "BLOFIN_LIVE_ENABLED":"false"}
+                out=run_cycle(exchange,db,analyzer=lambda *_:signal,symbols=("BTC-USDT",),
+                              executor=executor,environ=env)
+                self.assertEqual(executor.called,1)
+                self.assertTrue(out["orders_submitted"])
+                db.close()
+
+    def test_demo_advisory_status_is_blocked_when_live_flag_is_true(self):
+        db=sqlite3.connect(":memory:")
+        store=FakeStore({})
+        executor=FakeEntryExecutor(store)
+        exchange=FakeExchange(mark="100")
+        signal={"execution_profile":"CHALLENGE_1_V2","instrument_id":"BTC-USDT",
+          "signal":"LONG","signal_id":"signal-demo-002","status":"SIGNAL_READY",
+          "ai_consensus":{"status":"APPROVED_WITH_GROQ_ADVISORY","demo_advisory_mode":True,
+            "reviewer_approved":True,"technical_approved":True,
+            "expected_side":"LONG","reviewed_signal_id":"signal-demo-002"}}
+        env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true",
+          "BLOFIN_DEMO_TRADING_ENABLED":"true",
+          "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE":"true",
+          "BLOFIN_LIVE_ENABLED":"true"}
+        out=run_cycle(exchange,db,analyzer=lambda *_:signal,symbols=("BTC-USDT",),
+                      executor=executor,environ=env)
+        self.assertEqual(executor.called,0)
+        self.assertFalse(out["orders_submitted"])
+        self.assertEqual(out["symbols"][0]["entry_skipped_reason"],"GROQ_APPROVAL_NOT_PRESENT")
+        db.close()
+
     def test_single_groq_approval_enters_executor_and_persists_exit_state(self):
         db=sqlite3.connect(":memory:")
         store=FakeStore({})

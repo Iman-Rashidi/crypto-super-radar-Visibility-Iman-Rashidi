@@ -100,8 +100,8 @@ class DemoAdvisoryExecutorTests(unittest.TestCase):
                 "elliott_wave": {"phase": "WAVE_3_CONFIRMED", "pattern": "BULLISH"},
             },
             "ai_consensus": {
-                "status": "VETO",
-                "reviewer_status": "VETO",
+                "status": "APPROVED_WITH_GROQ_ADVISORY_VETO",
+                "reviewer_status": "APPROVED_WITH_GROQ_ADVISORY_VETO",
                 "reviewer_approved": True,
                 "technical_approved": True,
                 "demo_advisory_mode": True,

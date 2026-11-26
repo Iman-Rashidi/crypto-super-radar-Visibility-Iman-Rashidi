@@ -222,7 +222,11 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     )
     if demo_advisory_mode:
         advisory_ready = (
-            consensus.get("demo_advisory_mode") is True
+            consensus.get("status") in {
+                "APPROVED_WITH_GROQ_ADVISORY",
+                "APPROVED_WITH_GROQ_ADVISORY_VETO",
+            }
+            and consensus.get("demo_advisory_mode") is True
             and consensus.get("reviewer_approved") is True
             and consensus.get("technical_approved") is True
             and consensus.get("expected_side") == side
