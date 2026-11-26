@@ -190,3 +190,50 @@ def monitor_elliott_waves(
             f"A {selected['direction'].lower()} impulse prefix is structurally valid through wave {size - 1}; next wave is only a scenario."
         ),
     }
+
+
+
+def detect_impulse_pattern(df: pd.DataFrame, min_ratio_wave3: float = 1.618,
+                          max_ratio_wave2: float = 0.786) -> dict[str, Any]:
+    """Detect a four-wave impulse from non-repainting pivots confirmed by 2 right bars."""
+    empty = {"pattern": "NONE", "phase": "UNCONFIRMED", "confidence": 0.0, "pivots": []}
+    if not isinstance(df, pd.DataFrame) or not {"high", "low"}.issubset(df.columns) or len(df) < 9:
+        return empty
+    highs = pd.to_numeric(df["high"], errors="coerce").to_numpy(dtype=float)
+    lows = pd.to_numeric(df["low"], errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(highs).all() or not np.isfinite(lows).all():
+        return empty
+    pivots = []
+    for i in range(2, len(df) - 2):
+        if highs[i] > max(highs[i-2:i].max(), highs[i+1:i+3].max()):
+            pivots.append({"index": i, "kind": "HIGH", "price": float(highs[i]), "confirmed_at_index": i+2})
+        if lows[i] < min(lows[i-2:i].min(), lows[i+1:i+3].min()):
+            pivots.append({"index": i, "kind": "LOW", "price": float(lows[i]), "confirmed_at_index": i+2})
+    pivots.sort(key=lambda p: p["index"])
+    # Collapse adjacent same-kind pivots to the more extreme point.
+    compact = []
+    for p in pivots:
+        if compact and compact[-1]["kind"] == p["kind"]:
+            better = p["price"] > compact[-1]["price"] if p["kind"] == "HIGH" else p["price"] < compact[-1]["price"]
+            if better: compact[-1] = p
+        else: compact.append(p)
+    if len(compact) < 5: return {**empty, "pivots": compact[-5:]}
+    for pts in (compact[-5:], compact[-5:]):
+        kinds = [p["kind"] for p in pts]
+        bullish = kinds == ["LOW", "HIGH", "LOW", "HIGH", "LOW"]
+        bearish = kinds == ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
+        if not (bullish or bearish): continue
+        p0,p1,p2,p3,p4 = [p["price"] for p in pts]
+        w1 = abs(p1-p0); w2 = abs(p1-p2); w3 = abs(p3-p2); w4 = abs(p3-p4)
+        if min(w1,w2,w3,w4) <= 0: continue
+        retr2, ext3, retr4 = w2/w1, w3/w1, w4/w3
+        valid = (0.382 <= retr2 <= max_ratio_wave2 and ext3 >= min_ratio_wave3
+                 and 0.236 <= retr4 <= 0.50
+                 and (p4 > p1 if bullish else p4 < p1))
+        if valid:
+            fit = min(1.0, (ext3-min_ratio_wave3)/max(min_ratio_wave3, 1e-9) + 0.5)
+            confidence = round(70 + 30*fit, 2)
+            return {"pattern": "BULLISH" if bullish else "BEARISH", "phase": "WAVE_4_CONFIRMED",
+                    "confidence": confidence, "pivots": pts,
+                    "ratios": {"wave2_retracement": retr2, "wave3_extension": ext3, "wave4_retracement": retr4}}
+    return {**empty, "pivots": compact[-5:]}

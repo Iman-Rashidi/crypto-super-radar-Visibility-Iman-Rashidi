@@ -10,12 +10,12 @@ import math
 import os
 import numpy as np
 import pandas as pd
-from .elliott_waves import monitor_elliott_waves
+from .elliott_waves import monitor_elliott_waves, detect_impulse_pattern
 from .challenge1_strategy import challenge1_entry_evidence_ready
 
 MAX_STOP_DISTANCE_PCT = 0.035
 MIN_ADX_1H = 18.0
-MIN_ENTRY_SCORE = 62.0
+MIN_ENTRY_SCORE = 55.0
 
 
 def _easy_demo_entry_enabled() -> bool:
@@ -320,8 +320,6 @@ def _regime(
     if any(pd.isna(x) or not math.isfinite(float(x)) for x in vals):
         return {"status": "UNKNOWN", "direction": "NONE", "reason": "1H indicator warm-up incomplete"}
     strength = float(adx14.iloc[-1])
-    if not adx_meets_entry_threshold(strength) and not _easy_demo_entry_enabled():
-        return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 18"}
     # ADX confirms trend strength; close location versus both fast EMAs sets direction.
     # HH/HL or LL/LH remains measurable confluence, never a standalone hard gate.
     ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
@@ -896,7 +894,7 @@ def build_fast_trigger_signal(
         return {"signal": "NO_TRADE", "reason": "Fast trigger funding event is stale or future-dated"}
     funding = float(funding_rate)
     spread = float(spread_fraction)
-    if not math.isfinite(funding) or not math.isfinite(spread) or spread < 0 or spread > 0.0004:
+    if not math.isfinite(funding) or not math.isfinite(spread) or spread < 0 or spread >= 0.0004:
         return {"signal": "NO_TRADE", "reason": "Fast trigger funding or spread guard failed"}
     if (side == "LONG" and funding > 0.0005) or (side == "SHORT" and funding < -0.0005):
         return {"signal": "NO_TRADE", "reason": "Fast trigger funding crowding guard blocked entry"}
@@ -1397,8 +1395,6 @@ def analyze_signal(
     if not math.isfinite(funding) or not math.isfinite(spread) or spread < 0 or spread > 0.0004:
         return {"signal": "NO_TRADE", "reason": "Funding/spread guard failed", "regime": regime}
     direction = regime["direction"]
-    if (direction == "LONG" and funding > 0.0005) or (direction == "SHORT" and funding < -0.0005):
-        return {"signal": "NO_TRADE", "reason": "Funding crowding guard blocked entry", "regime": regime}
 
     if precomputed_context is None:
         m15 = _closed(_validate(frame_15m, "15M", 70), asof, pd.Timedelta(minutes=15))
@@ -1443,34 +1439,31 @@ def analyze_signal(
         atr_valid = precomputed_context["indicators"]["15M"]["atr14_valid"]
         atr_valid_end = int(atr_valid.index.searchsorted(m15.index[-1], side="right"))
         atr_series = atr_valid.iloc[:atr_valid_end]
-    if len(atr_series) < 25:
-        return {"signal": "NO_TRADE", "reason": "ATR shock baseline unavailable", "regime": regime}
-    prior_mean = float(atr_series.iloc[-21:-1].mean())
-    current_atr = float(atr_series.iloc[-1])
-    if prior_mean <= 0 or current_atr > 2.5 * prior_mean:
-        return {"signal": "NO_TRADE", "reason": "15M ATR shock exceeds 2.5x its 20-bar baseline", "regime": regime}
+    current_atr = float(atr14.iloc[-1])
+    prior_mean = float(atr_series.iloc[-21:-1].mean()) if len(atr_series) >= 25 else current_atr
+    atr_shock = bool(prior_mean > 0 and current_atr > 2.5 * prior_mean)
 
     if precomputed_context is None:
         btc = _closed(_validate(btc_15m, "BTC 15M", 40), asof, pd.Timedelta(minutes=15))
         if len(btc) < 25:
-            return {"signal": "NO_TRADE", "reason": "BTC master feed unavailable", "regime": regime}
-        btc_ema21 = ema(btc["close"], 21)
+            btc_ema21 = pd.Series(dtype=float)
+        else:
+            btc_ema21 = ema(btc["close"], 21)
     else:
         btc, btc_end = _closed_prefix(
             precomputed_context["frames"]["BTC_15M"], asof, pd.Timedelta(minutes=15)
         )
         if len(btc) < 25:
-            return {"signal": "NO_TRADE", "reason": "BTC master feed unavailable", "regime": regime}
-        btc_ema21 = precomputed_context["indicators"]["BTC_15M"]["ema21"].iloc[:btc_end]
-    btc_change = float(btc["close"].iloc[-1] / btc["close"].iloc[-2] - 1.0)
-    if symbol != "BTC-USDT":
+            btc_ema21 = pd.Series(dtype=float)
+        else:
+            btc_ema21 = precomputed_context["indicators"]["BTC_15M"]["ema21"].iloc[:btc_end]
+    btc_change = float(btc["close"].iloc[-1] / btc["close"].iloc[-2] - 1.0) if len(btc) >= 2 else 0.0
+    if len(btc) >= 25 and symbol != "BTC-USDT":
         btc_ok = (float(btc["close"].iloc[-1]) > float(btc_ema21.iloc[-1]) and btc_change > -0.008) if direction == "LONG" else (
             float(btc["close"].iloc[-1]) < float(btc_ema21.iloc[-1]) and btc_change < 0.008
         )
     else:
         btc_ok = True
-    if not _btc_master_guard_allows_entry(btc_ok):
-        return {"signal": "NO_TRADE", "reason": "BTC master guard blocked altcoin setup", "regime": regime}
 
     entry = float(last["close"])
     atr_mult = _resolve_stop_atr_multiplier(symbol, stop_atr_multiplier_override)
@@ -1484,46 +1477,39 @@ def analyze_signal(
     if stop_pct <= 0 or stop_pct > MAX_STOP_DISTANCE_PCT:
         return {"signal": "NO_TRADE", "reason": "stop distance breaches 3.5% volatility cap", "regime": regime}
 
-    if _easy_demo_entry_enabled():
-        # Easy Demo: H1 EMA21 direction is the directional trigger. Lower-timeframe
-        # momentum/RSI, 4H opposition, BTC alignment and Elliott structure are
-        # retained as advisory evidence; they cannot veto a valid directional
-        # signal. Data freshness, funding/spread, ATR shock and protective-stop
-        # geometry remain hard safety gates above.
-        ema15_slope = float(e21.iloc[-1] - e21.iloc[-4])
-        ema15_slope_advisory = (
-            float(last["close"]) > float(e21.iloc[-1]) and ema15_slope > 0
-            if direction == "LONG" else
-            float(last["close"]) < float(e21.iloc[-1]) and ema15_slope < 0
-        )
-        confirmation = _easy_demo_entry_confirmation(direction, last, rsi_value)
-        demo_entry_context = {
-            **confirmation,
-            "ema15_slope_advisory": bool(ema15_slope_advisory),
-            "rsi_15m": rsi_value,
-            "btc_master_aligned": bool(btc_ok),
-            "h4_opposed": bool(regime.get("opposed_4h")),
-            "elliott_alignment": None,
-            "advisory_gates": ["opposed_4h", "btc_master_guard", "elliott_wave",
-                               "m15_candle_momentum", "m15_rsi_alignment"],
-        }
-        score_parts = {
-            "h1_close_vs_ema21_direction": 80,
-            "m15_momentum_advisory": 5 if confirmation["candle_momentum"] else 0,
-            "m15_rsi_advisory": 5 if confirmation["rsi_aligned"] else 0,
-            "h4_alignment_advisory": 5 if regime.get("aligned_4h") else 0,
-            "btc_alignment_advisory": 5 if btc_ok else 0,
-        }
-    else:
-        score_parts = {
-            "h1_close_vs_ema21": 35,
-            "h1_adx_gte_18": 35 if adx_meets_entry_threshold(regime["adx_1h"]) else 0,
-            "h4_alignment_bonus": 20 if regime.get("aligned_4h") else 0,
-            "btc_alignment": 10 if btc_ok else 0,
-        }
-    confidence_score = sum(score_parts.values())
+    # Closed 15m trend is the sole mandatory directional indicator gate.
+    ema15_slope = float(e21.iloc[-1] - e21.iloc[-4])
+    trend15_ok = (
+        float(last["close"]) > float(e21.iloc[-1]) and ema15_slope > 0
+        if direction == "LONG" else
+        float(last["close"]) < float(e21.iloc[-1]) and ema15_slope < 0
+    )
+    if not trend15_ok:
+        return {"signal": "NO_TRADE", "reason": "mandatory closed 15m EMA21 trend/slope filter failed", "regime": regime}
+    confirmation = _easy_demo_entry_confirmation(direction, last, rsi_value)
+    wave_score = detect_impulse_pattern(m15)["confidence"]
+    wave_alignment = detect_impulse_pattern(m15)["pattern"] == ("BULLISH" if direction == "LONG" else "BEARISH")
+    rsi_ok = (40 <= rsi_value <= 75) if direction == "LONG" else (25 <= rsi_value <= 60)
+    breakout_ok = (
+        float(last["close"]) > float(previous["high"]) if direction == "LONG"
+        else float(last["close"]) < float(previous["low"])
+    )
+    funding_ok = not ((direction == "LONG" and funding > 0.0005) or (direction == "SHORT" and funding < -0.0005))
+    score_parts = {
+        "h1_ema21_direction": 20,
+        "adx_1h": 15 if adx_meets_entry_threshold(regime["adx_1h"]) else 0,
+        "h1_ema21_slope": 10 if (regime["ema21_slope_1h"] > 0 if direction == "LONG" else regime["ema21_slope_1h"] < 0) else 0,
+        "elliott_fibonacci": min(15.0, max(0.0, wave_score * (0.15 if wave_alignment else 0.0))),
+        "volume_ratio": 10 if volume_ratio >= 1.2 else 5 if volume_ratio >= 1.0 else 0,
+        "rsi_zone": 10 if rsi_ok else 0,
+        "breakout_extension": 5 if breakout_ok and not atr_shock else 0,
+        "funding": 10 if funding_ok else 0,
+        "h4_alignment": 5 if regime.get("aligned_4h") else 0,
+        "btc_alignment": 5 if btc_ok else 0,
+    }
+    confidence_score = min(100.0, sum(score_parts.values()))
     if not entry_score_meets_threshold(confidence_score):
-        return {"signal": "NO_TRADE", "reason": "confluence score below 62", "regime": regime,
+        return {"signal": "NO_TRADE", "reason": "weighted score below 55", "regime": regime,
                 "confidence_score": confidence_score, "score_parts": score_parts}
     hour = m15.index[-1].hour
     ema200_1h = float(regime["ema200_1h"])
@@ -1566,16 +1552,15 @@ def analyze_signal(
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
         "easy_demo_entry_mode": _easy_demo_entry_enabled(),
-        "entry_gate_policy": (
-            "EASY_DEMO_ENTRY_STRICT_EXIT" if _easy_demo_entry_enabled()
-            else "STANDARD_CHALLENGE_1_V2"
-        ),
+        "entry_gate_policy": "WEIGHTED_SCORE_55_PLUS_15M_TREND_AND_TWO_RISK_GATES",
         "advisory_entry_gates": (
             ["opposed_4h", "btc_master_guard", "elliott_wave",
              "m15_candle_momentum", "m15_rsi_alignment"]
             if _easy_demo_entry_enabled() else []
         ),
-        "elliott_is_advisory": _easy_demo_entry_enabled(),
+        "elliott_is_advisory": True,
+        "trend_15m_passed": True,
+        "weighted_score_threshold": MIN_ENTRY_SCORE,
     }
     return {
         "signal": direction, "signal_id": signal_id, "instrument_id": symbol,
