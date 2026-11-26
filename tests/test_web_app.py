@@ -1506,6 +1506,43 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertTrue(result["read_only"])
         self.assertFalse(result["orders_submitted"])
 
+    def test_challenge1_v2_demo_performance_sample_threshold_uses_verified_trades(self):
+        def completed_trade(index, pnl, vetoed):
+            return {
+                "verification": {"status": "PASS"},
+                "environment": "BLOFIN_DEMO",
+                "challenge_id": "CHALLENGE_1_V2_BLOFIN_DEMO",
+                "decision_mode": "BOT_ONLY",
+                "events": [
+                    {"event_type": "DECISION_RECORDED", "payload": {
+                        "input_snapshot": {"ai_consensus": {"groq_vetoed": vetoed}}
+                    }},
+                    {"event_type": "OUTCOME_LABELLED", "payload": {
+                        "final": True,
+                        "realized_result": "PROFIT" if pnl > 0 else "LOSS",
+                        "realized_net_pnl": pnl,
+                        "pnl_currency": "USDT",
+                        "evidence": {
+                            "trade_executed": True,
+                            "mark_to_market_pnl_used": False,
+                            "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
+                        },
+                    }},
+                ],
+            }
+        orders = [{"reserved_risk_usdt": "20"} for _ in range(50)]
+        experiences = [completed_trade(i, 1 if i % 2 == 0 else -1, i % 3 == 0) for i in range(50)]
+        result = web_app._challenge1_v2_demo_performance_metrics(
+            orders, experiences, closed_order_count=50, open_trade_count=0,
+            groq_decision_counts={"vetoed": 10, "not_vetoed": 40, "unknown": 0},
+        )
+        self.assertEqual(result["status"], "SAMPLE_TARGET_REACHED")
+        self.assertEqual(result["valid_closed_trade_count"], 50)
+        self.assertEqual(result["win_rate_pct"], 50.0)
+        self.assertAlmostEqual(result["average_r"], 0.0)
+        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 17)
+        self.assertEqual(result["groq_closed_trade_performance"]["not_vetoed"]["closed_trade_count"], 33)
+
     def test_challenge1_v2_demo_performance_reports_open_positions_when_no_trade_closed(self):
         result = web_app._challenge1_v2_demo_performance_metrics(
             [], [], closed_order_count=0, open_trade_count=3,
