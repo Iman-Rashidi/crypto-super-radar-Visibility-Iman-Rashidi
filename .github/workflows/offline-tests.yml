@@ -160,3 +160,5 @@ jobs:
           assert any("CRYPTO SUPER RADAR" in item.value for item in app.title)
           assert any("اجرای اسکن پژوهشی" in item.label for item in app.button)
           PY
+
+# Manual Staging CI retrigger: rebuild the Render source archive for the current Staging tree.
