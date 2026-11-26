@@ -63,6 +63,7 @@ from .challenge1_v2_orchestration import (
     Challenge1V2DataBlocked, analyze_challenge1_v2_market, get_fresh_execution_quote,
 )
 from .database import connect_database, connect_turso_database, storage_backend
+from .demo_dashboard_cache import cached_demo_dashboard_report, cycle_lag_status
 from .learning_experience_memory import LearningExperienceMemory, TRADE_AUTOPSY_CODES
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
@@ -3282,6 +3283,19 @@ def _blofin_challenge1_v2_performance_report() -> dict:
             pending_order_count=int(pending_total["total"] if pending_total else 0),
             groq_decision_counts=groq_counts, target_trade_count=50,
         )
+        last_successful_cycle_at = None
+        try:
+            cycle_row = store._db.execute(
+                """SELECT MAX(finished_at_utc) AS last_successful_cycle_at
+                   FROM challenge1_v2_autopilot_cycles
+                   WHERE status NOT IN ('DATA_BLOCKED','API_ERROR','SAFE_MODE_API_ERROR','EXIT_MANAGEMENT_ERROR')"""
+            ).fetchone()
+            if cycle_row:
+                last_successful_cycle_at = cycle_row["last_successful_cycle_at"]
+        except Exception:
+            # A missing cycle ledger is surfaced as a freshness warning, not as fresh data.
+            last_successful_cycle_at = None
+        result.update(cycle_lag_status(last_successful_cycle_at))
         result["message_fa"] = (
             "هنوز معاملهٔ بسته‌شده‌ای برای CHALLENGE_1_V2 در دفترکل BloFin Demo ثبت نشده است."
             if result["closed_order_count"] == 0 else
@@ -8151,7 +8165,7 @@ class Handler(BaseHTTPRequestHandler):
                     "message_fa": "برای مشاهدهٔ گزارش BloFin Demo، توکن معتبر پنل را وارد کن.",
                     "orders_submitted": False, "read_only": True,
                 }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            payload = _blofin_challenge1_v2_performance_report()
+            payload = cached_demo_dashboard_report(_blofin_challenge1_v2_performance_report, ttl_seconds=60)
             status_code = 200 if payload.get("status") != "UNAVAILABLE" else 503
             return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
