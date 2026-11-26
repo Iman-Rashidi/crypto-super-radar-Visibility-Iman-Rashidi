@@ -689,7 +689,7 @@ class WebAppHttpTests(unittest.TestCase):
             cached_snapshot = web_app._blofin_v2_public_cycle_snapshot()
         self.assertGreaterEqual(connect.call_count, 1)
         self.assertEqual(cached_snapshot, snapshot)
-        self.assertEqual(snapshot["status"], "OK")
+        self.assertEqual(snapshot["status"], "OK", snapshot)
         self.assertEqual(len(snapshot["cycles"]), 1)
         cycle = snapshot["cycles"][0]
         self.assertEqual(cycle["signal_raw"], "LONG")
