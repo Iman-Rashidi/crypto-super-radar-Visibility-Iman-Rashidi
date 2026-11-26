@@ -1635,8 +1635,9 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             experience_id = self.store.record_challenge1_decision(
                 instrument_id="BTC-USDT", challenge_record=challenge,
             )
-            plan = self._plan()
-            plan["signal_id"] = signal_id
+            plan = build_demo_order_plan(
+                challenge, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+            )
             plan["experience_id"] = experience_id
             self.assertTrue(self.store.reserve_order(plan))
             self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="rounding-" + pid)
