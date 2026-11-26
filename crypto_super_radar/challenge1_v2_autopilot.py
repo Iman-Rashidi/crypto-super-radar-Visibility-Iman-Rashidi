@@ -66,13 +66,27 @@ def build_v2_demo_risk_policy():
 
 
 def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    allowed = ("execution_profile", "signal", "status", "reason", "entry_price", "stop_loss",
-        "take_profit", "regime", "market_data_proof", "contract_specs", "market_quote",
-        "signal_id", "ai_review", "second_ai_review", "ai_reviews", "ai_consensus",
-        "ai_status", "ai_review_reason", "orders_submitted", "execution_result",
-        "entry_skipped_reason", "mode", "exit_manager_summary",
-        "demo_entry_context", "easy_demo_entry_mode", "entry_gate_policy",
-        "elliott_rejection_reason", "elliott_evidence_snapshot")
+    """Credential-free per-symbol audit allowlist; missing proof stays missing."""
+    allowed = (
+        "execution_profile", "signal", "status", "reason", "reason_fa", "analysis_reason_fa",
+        "entry_price", "entry", "stop_loss", "take_profit", "regime", "market_data_proof",
+        "contract_specs", "market_quote", "signal_id", "signal_candle_open_utc",
+        "ai_review", "second_ai_review", "ai_reviews", "ai_consensus", "ai_status",
+        "ai_review_reason", "ai_request_attempted", "ai_model", "ai_decision", "ai_reason_fa",
+        "ai_response_validated", "ai_model_verified", "ai_error_type", "ai_error_code",
+        "ai_http_status", "ai_skip_reason_code", "orders_submitted", "execution_result",
+        "entry_skipped_reason", "mode", "exit_manager_summary", "demo_entry_context",
+        "easy_demo_entry_mode", "entry_gate_policy", "elliott_rejection_reason",
+        "elliott_evidence_snapshot", "challenge1_v2_evidence", "challenge1_evidence",
+        "elliott_wave", "wave_evidence", "trend_evidence", "filter_evidence",
+        "confirmation_filters", "confirmed_filters", "failed_filters", "opposing_factors",
+        "risk_factors", "reasons_fa", "score_parts", "confidence_score", "confirmation_score",
+        "risk_score", "gross_rr", "net_reward_risk", "atr", "atr_value", "funding_rate",
+        "spread_fraction", "rejection_code", "block_reason_code", "data_quality",
+        "trade_context", "market_data_diagnostics", "fast_trigger_diagnostic",
+        "early_w3_diagnostic", "wave4_fibonacci", "rsi_divergence_guard", "funding",
+        "funding_classification", "entry_skipped_reason_code", "filter_results", "gate_results",
+    )
     return {key: record.get(key) for key in allowed if key in record}
 
 

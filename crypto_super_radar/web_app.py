@@ -933,14 +933,42 @@ def _publish_blofin_v2_cycle_report(report: dict) -> dict:
             payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
         for row in symbols:
             proof = row.get("market_data_proof") if isinstance(row.get("market_data_proof"), dict) else {}
-            started_at = str(proof.get("asof_utc") or report.get("started_at_utc") or finished_at)
+            started_at = str(report.get("started_at_utc") or row.get("started_at_utc") or proof.get("asof_utc") or finished_at)
+            # Never attribute a cycle-level AI response to a symbol without symbol-level evidence.
+            row_reviews = row.get("ai_reviews") if isinstance(row.get("ai_reviews"), list) else []
+            row_review = row.get("ai_review") if isinstance(row.get("ai_review"), dict) else {}
+            row_consensus = row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {}
             payload = {
-                "ai_reviews": report.get("ai_reviews") if isinstance(report.get("ai_reviews"), list) else [],
-                "ai_consensus": report.get("ai_consensus") if isinstance(report.get("ai_consensus"), dict) else {},
-                "ai_reviews_performed": report.get("ai_reviews_performed") is True,
+                "ai_reviews": row_reviews, "ai_review": row_review, "ai_consensus": row_consensus,
+                "ai_reviews_performed": bool(row_reviews or row_review),
+                "ai_request_attempted": row.get("ai_request_attempted"),
+                "ai_model": row.get("ai_model"), "ai_decision": row.get("ai_decision"),
+                "ai_reason_fa": row.get("ai_reason_fa"),
+                "ai_response_validated": row.get("ai_response_validated"),
+                "ai_model_verified": row.get("ai_model_verified"),
                 "market_data_proof": proof,
                 "regime": row.get("regime") if isinstance(row.get("regime"), dict) else {},
                 "entry_skipped_reason": row.get("entry_skipped_reason"),
+                "reason_fa": row.get("reason_fa") or row.get("analysis_reason_fa"),
+                "challenge1_v2_evidence": row.get("challenge1_v2_evidence") if isinstance(row.get("challenge1_v2_evidence"), dict) else {},
+                "challenge1_evidence": row.get("challenge1_evidence") if isinstance(row.get("challenge1_evidence"), dict) else {},
+                "elliott_wave": row.get("elliott_wave") if isinstance(row.get("elliott_wave"), dict) else {},
+                "wave_evidence": row.get("wave_evidence") if isinstance(row.get("wave_evidence"), dict) else {},
+                "trend_evidence": row.get("trend_evidence") if isinstance(row.get("trend_evidence"), dict) else {},
+                "filter_evidence": row.get("filter_evidence") if isinstance(row.get("filter_evidence"), (dict, list)) else {},
+                "confirmation_filters": row.get("confirmation_filters") if isinstance(row.get("confirmation_filters"), (dict, list)) else {},
+                "confirmed_filters": row.get("confirmed_filters") if isinstance(row.get("confirmed_filters"), list) else [],
+                "failed_filters": row.get("failed_filters") if isinstance(row.get("failed_filters"), list) else [],
+                "opposing_factors": row.get("opposing_factors") if isinstance(row.get("opposing_factors"), list) else [],
+                "risk_factors": row.get("risk_factors") if isinstance(row.get("risk_factors"), list) else [],
+                "reasons_fa": row.get("reasons_fa") if isinstance(row.get("reasons_fa"), dict) else {},
+                "score_parts": row.get("score_parts") if isinstance(row.get("score_parts"), dict) else {},
+                "fast_trigger_diagnostic": row.get("fast_trigger_diagnostic") if isinstance(row.get("fast_trigger_diagnostic"), dict) else {},
+                "early_w3_diagnostic": row.get("early_w3_diagnostic") if isinstance(row.get("early_w3_diagnostic"), dict) else {},
+                "wave4_fibonacci": row.get("wave4_fibonacci") if isinstance(row.get("wave4_fibonacci"), dict) else {},
+                "rsi_divergence_guard": row.get("rsi_divergence_guard") if isinstance(row.get("rsi_divergence_guard"), dict) else {},
+                "funding": row.get("funding") if isinstance(row.get("funding"), dict) else {},
+                "funding_classification": row.get("funding_classification"),
                 "cycle_status": report.get("status"),
                 "source": "GITHUB_ACTIONS_OIDC_VERIFIED_STAGING_WORKER",
             }
@@ -966,6 +994,98 @@ def _publish_blofin_v2_cycle_report(report: dict) -> dict:
         }
     finally:
         connection.close()
+
+
+def _v2_evidence_summary_fa(row: Mapping[str, Any]) -> str:
+    """Summarize persisted evidence for one symbol without inventing proof."""
+    parts = []
+    for key in ("reason_fa", "analysis_reason_fa"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+            break
+    if not parts:
+        reason = row.get("reason")
+        if isinstance(reason, str) and re.search(r"[آ-ی]", reason):
+            parts.append(reason.strip())
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    evidence = payload.get("challenge1_v2_evidence") or payload.get("challenge1_evidence") or {}
+    wave = evidence.get("elliott_wave") if isinstance(evidence, Mapping) else None
+    if not isinstance(wave, Mapping):
+        wave = payload.get("elliott_wave") or payload.get("wave_evidence") or {}
+    if isinstance(wave, Mapping) and wave:
+        facts = [str(wave.get(k)) for k in ("pattern", "phase", "wave_alignment") if wave.get(k) not in (None, "")]
+        if facts:
+            parts.append("شواهد موج: " + " / ".join(facts))
+    proof = payload.get("market_data_proof") if isinstance(payload.get("market_data_proof"), Mapping) else {}
+    if proof:
+        rule, timeframe = proof.get("signal_rule"), proof.get("signal_timeframe")
+        if rule or timeframe:
+            parts.append("قاعده و تایم‌فریم: " + " / ".join(str(x) for x in (rule, timeframe) if x))
+        frames = proof.get("timeframes")
+        if isinstance(frames, Mapping):
+            available = [f"{tf}: {v.get('rows')} کندل" for tf, v in frames.items()
+                         if isinstance(v, Mapping) and v.get("rows") is not None]
+            if available:
+                parts.append("پوشش داده: " + "، ".join(available))
+    diagnostic = payload.get("fast_trigger_diagnostic")
+    if isinstance(diagnostic, Mapping):
+        if diagnostic.get("decision_reason_fa"):
+            parts.append("دلیل تریگر: " + str(diagnostic["decision_reason_fa"]))
+        if diagnostic.get("fast_path_rejection"):
+            parts.append("رد تریگر جایگزین: " + str(diagnostic["fast_path_rejection"]))
+    regime = payload.get("regime") if isinstance(payload.get("regime"), Mapping) else {}
+    if regime:
+        facts = [f"{label}: {regime.get(key)}" for key, label in
+                 (("direction", "جهت روند"), ("status", "وضعیت روند"), ("aligned_4h", "هم‌جهتی ۴ساعته"))
+                 if regime.get(key) not in (None, "")]
+        if facts:
+            parts.append("؛ ".join(facts))
+    for key, label in (("confirmed_filters", "فیلترهای تأییدشده"), ("failed_filters", "فیلترهای ردشده"),
+                       ("opposing_factors", "عوامل مخالف"), ("risk_factors", "ریسک‌های باقی‌مانده")):
+        values = payload.get(key)
+        if isinstance(values, list) and values:
+            parts.append(label + ": " + "، ".join(str(x) for x in values[:8]))
+    reasons = payload.get("reasons_fa")
+    if isinstance(reasons, Mapping):
+        for key, label in (("positive", "شواهد مثبت"), ("cautions", "احتیاط")):
+            values = reasons.get(key)
+            if isinstance(values, list) and values:
+                parts.append(label + ": " + "، ".join(str(x) for x in values[:8]))
+    if parts:
+        return "؛ ".join(dict.fromkeys(parts))[:1800]
+    if str(row.get("status") or "").upper() == "ANALYSIS_READY":
+        return "مدرک تفصیلی برای این نماد در رکورد موجود نیست؛ دلیل سیگنال قابل راستی‌آزمایی نیست."
+    return "مدرک توضیحی در رکورد این نماد موجود نیست."
+
+
+def _v2_groq_summary_fa(votes: Any) -> str:
+    if not isinstance(votes, list):
+        votes = []
+    groq = next((v for v in votes if isinstance(v, Mapping) and
+                 (str(v.get("reviewer_id") or "").lower() == "groq" or
+                  "groq" in str(v.get("provider") or "").lower())), None)
+    if not isinstance(groq, Mapping):
+        return "مدرکی از بررسی Groq در رکورد این نماد موجود نیست."
+    if groq.get("request_attempted") is False:
+        return "درخواست Groq ارسال نشده" + ("؛ " + str(groq.get("skip_reason_code")) if groq.get("skip_reason_code") else "")
+    model = groq.get("returned_model") or groq.get("model")
+    decision = groq.get("opinion") or groq.get("status") or "نتیجه ثبت نشده"
+    reason = groq.get("reason_fa") or ""
+    validity = "پاسخ معتبر" if groq.get("verified") is True else (
+        "پاسخ ثبت شد اما اعتبارسنجی کامل نیست" if groq.get("request_attempted") is True
+        else "وضعیت ارسال درخواست در رکورد مشخص نیست")
+    return " · ".join(str(x) for x in (model, decision, validity, reason) if x)[:1200]
+
+
+def _v2_status_fa(status: Any) -> str:
+    return {
+        "ANALYSIS_READY": "آماده بررسی؛ به‌معنی مجوز ورود نیست",
+        "AI_REVIEW_BLOCKED": "مسدودشده توسط ناظر هوش مصنوعی",
+        "DATA_BLOCKED": "مسدودشده به‌دلیل کمبود یا اعتبار داده",
+        "NO_TRADE": "بدون سیگنال معاملاتی",
+        "MANAGEMENT_ONLY": "فقط مدیریت موقعیت‌های موجود",
+    }.get(str(status or "").upper(), str(status or "وضعیت نامشخص"))
 
 
 def _blofin_v2_public_cycle_snapshot() -> dict:
@@ -1038,9 +1158,11 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                     "returned_model": review.get("returned_model") or review.get("model") or entry.get("returned_model") or entry.get("model"),
                 })
             item["signal_raw"] = payload.get("signal") or item.get("signal") or "UNKNOWN"
-            for field in ("entry_price", "stop_loss", "take_profit", "entry_skipped_reason", "execution_profile"):
+            for field in ("entry_price", "stop_loss", "take_profit", "entry_skipped_reason",
+                          "execution_profile", "reason_fa", "analysis_reason_fa"):
                 if field in payload:
                     item[field] = payload.get(field)
+            item["payload"] = payload
             item["ai_votes"] = votes
             item["ai_consensus"] = payload.get("ai_consensus") if isinstance(payload.get("ai_consensus"), dict) else {}
             decoded.append(item)
@@ -1063,14 +1185,20 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                 "status": row.get("status"),
                 "signal": row.get("signal"),
                 "signal_raw": row.get("signal_raw") or row.get("signal") or "UNKNOWN",
+                "status_fa": _v2_status_fa(row.get("status")),
+                "started_at_utc": row.get("started_at_utc"),
+                "finished_at_utc": row.get("finished_at_utc"),
                 "entry_price": row.get("entry_price"),
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
                 "entry_skipped_reason": str(row.get("entry_skipped_reason") or "")[:1000],
                 "reason": str(row.get("reason") or "")[:1000],
+                "reason_fa": _v2_evidence_summary_fa(row),
                 "orders_submitted": bool(row.get("orders_submitted")),
                 "ai_votes": row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else [],
+                "groq_summary_fa": _v2_groq_summary_fa(row.get("ai_votes")),
                 "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
+                "audit_evidence": row.get("payload") if isinstance(row.get("payload"), dict) else {},
             })
         with LOCK:
             state = copy.deepcopy(V2_AUTOPILOT_RUN_STATE)
@@ -1080,6 +1208,8 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
             "scan_time_utc": (
                 public_rows[0].get("finished_at_utc") or public_rows[0].get("started_at_utc")
             ) if public_rows else None,
+            "cycle_started_at_utc": public_rows[0].get("started_at_utc") if public_rows else None,
+            "cycle_finished_at_utc": public_rows[0].get("finished_at_utc") if public_rows else None,
             "cycles": public_rows,
             "run_state": {
                 "status": state.get("status") or "UNKNOWN",
@@ -8528,9 +8658,10 @@ async function loadBlofinInstruments(){
             function renderV2CycleSnapshot(payload){
               v2CycleHistory.replaceChildren();
               const run=payload.run_state||{};
-              v2CycleStatus.textContent='آخرین اسکن: '+(payload.scan_time_utc||'هنوز ثبت نشده')
-                +' · وضعیت اتوپایلوت: '+(run.status||'UNKNOWN')
-                +' · چرخه: '+(payload.latest_cycle_id||'—');
+              v2CycleStatus.textContent='شروع اسکن (UTC): '+(payload.cycle_started_at_utc||'در رکورد موجود نیست')
+                +' · پایان چرخه (UTC): '+(payload.cycle_finished_at_utc||payload.scan_time_utc||'ثبت نشده')
+                +' · وضعیت زمان‌بند/اتوپایلوت: '+(run.status||'نامشخص')
+                +' · چرخه: '+(payload.latest_cycle_id||'ثبت نشده');
               function add(parent,tag,value){
                 const node=document.createElement(tag);
                 node.textContent=value===null||value===undefined||value===''?'—':String(value);
@@ -8544,25 +8675,26 @@ async function loadBlofinInstruments(){
               }
               const table=document.createElement('table');
               table.style.width='100%';table.style.borderCollapse='collapse';
-              const headers=['نماد','وضعیت','سیگنال','دلیل','Groq'];
+              const headers=['نماد','وضعیت فارسی','سیگنال','شواهد و دلیل','گزارش ناظر Groq'];
               const thead=document.createElement('thead'),headRow=document.createElement('tr');
               headers.forEach(label=>{const th=add(headRow,'th',label);th.style.padding='8px';th.style.textAlign='right';});
               thead.appendChild(headRow);table.appendChild(thead);
               const tbody=document.createElement('tbody');
               cycles.forEach(item=>{
                 const tr=document.createElement('tr');
-                const votes=Array.isArray(item.ai_votes)?item.ai_votes:[];
-                const groq=votes.find(x=>x.reviewer_id==='groq'||String(x.provider||'').toLowerCase().includes('groq'))||{};
-                const opinion=x=>[x.status||'NOT_RECORDED',x.opinion&&x.opinion!==x.status?x.opinion:''].filter(Boolean).join(' · ');
-                [item.symbol,item.status,item.signal,item.reason,
-                 opinion(groq)].forEach(value=>{
+                const groqText=item.groq_summary_fa||'مدرکی از بررسی Groq در رکورد این نماد موجود نیست.';
+                [item.symbol,item.status_fa||item.status,item.signal,
+                 item.reason_fa||'مدرک توضیحی در رکورد این نماد موجود نیست.',
+                 groqText].forEach(value=>{
                   const td=add(tr,'td',value);td.style.padding='8px';td.style.borderTop='1px solid rgba(128,128,128,.25)';
                 });
                 tbody.appendChild(tr);
               });
               table.appendChild(tbody);v2CycleHistory.appendChild(table);
-              add(v2CycleHistory,'p','زمان اسکن (UTC): '+(payload.scan_time_utc||'—')
-                +' · Cycle ID: '+(payload.latest_cycle_id||'—')+' · محیط: BloFin Demo');
+              add(v2CycleHistory,'p','شروع اسکن (UTC): '+(payload.cycle_started_at_utc||'ثبت نشده')
+                +' · پایان چرخه (UTC): '+(payload.cycle_finished_at_utc||payload.scan_time_utc||'ثبت نشده')
+                +' · وضعیت زمان‌بند: '+(run.status||'نامشخص')
+                +' · Cycle ID: '+(payload.latest_cycle_id||'ثبت نشده')+' · محیط: BloFin Demo');
             }
             async function refreshV2CycleSnapshot(){
               try{

@@ -606,3 +606,56 @@ class Challenge1V2EasyDemoAutopilotPolicyTests(unittest.TestCase):
         self.assertEqual(out["risk_policy"]["leverage"], 2)
         self.assertFalse(out["orders_submitted"])
         db.close()
+
+
+class Challenge1V2AuditEvidencePersistenceTests(unittest.TestCase):
+    def test_safe_record_and_turso_payload_preserve_symbol_scoped_evidence(self):
+        import json
+        from crypto_super_radar.challenge1_v2_autopilot import _safe_record, persist_result
+        record = {
+            "signal": "LONG", "status": "ANALYSIS_READY",
+            "reason_fa": "روند ۱ساعته هم‌سو است؛ موج سوم تأیید شده است.",
+            "challenge1_v2_evidence": {"elliott_wave": {"pattern": "BULLISH", "phase": "WAVE_3_CONFIRMED"}},
+            "confirmed_filters": ["EMA_21", "RSI_ALIGNMENT"],
+            "risk_factors": ["مقاومت نزدیک"],
+            "ai_reviews": [{"reviewer_id": "groq", "request_attempted": True,
+                "returned_model": "llama-test", "status": "APPROVED",
+                "response_validated": True, "reason_fa": "شواهد هم‌جهت هستند."}],
+            "ai_consensus": {"status": "APPROVED_BY_GROQ"},
+            "private_api_key": "must-not-persist",
+        }
+        safe = _safe_record(record)
+        self.assertIn("challenge1_v2_evidence", safe)
+        self.assertIn("ai_reviews", safe)
+        self.assertNotIn("private_api_key", safe)
+        db = sqlite3.connect(":memory:")
+        try:
+            persist_result(db, cycle_id="a" * 32, symbol="BTC-USDT", result=record,
+                started_at="2026-11-26T10:00:00+00:00", finished_at="2026-11-26T10:00:05+00:00")
+            raw = db.execute(f"SELECT payload_json FROM {TABLE} WHERE symbol='BTC-USDT'").fetchone()[0]
+            saved = json.loads(raw)
+            self.assertEqual(saved["reason_fa"], record["reason_fa"])
+            self.assertEqual(saved["challenge1_v2_evidence"]["elliott_wave"]["phase"], "WAVE_3_CONFIRMED")
+            self.assertEqual(saved["ai_reviews"][0]["returned_model"], "llama-test")
+            self.assertEqual(saved["risk_factors"], ["مقاومت نزدیک"])
+        finally:
+            db.close()
+
+    def test_dashboard_summaries_are_symbol_specific_and_not_ambiguous(self):
+        from crypto_super_radar.web_app import _v2_evidence_summary_fa, _v2_groq_summary_fa, _v2_status_fa
+        row = {"status": "ANALYSIS_READY", "reason_fa": "روند ۱ساعته هم‌سو است.",
+            "payload": {"challenge1_v2_evidence": {"elliott_wave": {
+                "pattern": "BULLISH", "phase": "WAVE_3_CONFIRMED"}},
+                "confirmed_filters": ["EMA_21"], "risk_factors": ["مقاومت نزدیک"]}}
+        reason = _v2_evidence_summary_fa(row)
+        self.assertIn("روند ۱ساعته هم‌سو است", reason)
+        self.assertIn("WAVE_3_CONFIRMED", reason)
+        self.assertIn("مقاومت نزدیک", reason)
+        self.assertNotEqual(reason, "—")
+        groq = _v2_groq_summary_fa([{"reviewer_id": "groq", "request_attempted": True,
+            "returned_model": "llama-test", "status": "APPROVED", "opinion": "LONG",
+            "verified": True, "reason_fa": "تأیید شد."}])
+        self.assertIn("llama-test", groq)
+        self.assertIn("تأیید شد", groq)
+        self.assertIn("مدرکی", _v2_groq_summary_fa([]))
+        self.assertEqual(_v2_status_fa("AI_REVIEW_BLOCKED"), "مسدودشده توسط ناظر هوش مصنوعی")
