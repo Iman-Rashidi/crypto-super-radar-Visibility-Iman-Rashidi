@@ -1561,14 +1561,26 @@ class WebAppHttpTests(unittest.TestCase):
             "open_trade_count": 2, "pending_order_count": 1,
             "orders_submitted": False, "read_only": True,
         }
-        with patch.object(web_app, "_blofin_challenge1_v2_performance_report", return_value=payload):
-            status, _, body = self.request("GET", "/api/blofin/demo/challenge1-v2/performance")
+        with (
+            patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}),
+            patch.object(web_app, "_blofin_challenge1_v2_performance_report", return_value=payload),
+        ):
+            status, _, body = self.request(
+                "GET", "/api/blofin/demo/challenge1-v2/performance",
+                headers={"Authorization": "Bearer test-dashboard-token"},
+            )
         result = json.loads(body)
         self.assertEqual(status, 200)
         self.assertEqual(result["status"], "NO_CLOSED_TRADES")
         self.assertEqual(result["open_trade_count"], 2)
         self.assertEqual(result["pending_order_count"], 1)
         self.assertFalse(result["orders_submitted"])
+
+    def test_challenge1_v2_demo_performance_endpoint_requires_dashboard_token(self):
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}):
+            status, _, body = self.request("GET", "/api/blofin/demo/challenge1-v2/performance")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body)["status"], "UNAUTHORIZED")
 
     def test_challenge1_v2_demo_performance_endpoint_fails_closed_without_turso(self):
         with patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"):
