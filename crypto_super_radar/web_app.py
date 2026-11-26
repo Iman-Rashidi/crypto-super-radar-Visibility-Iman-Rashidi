@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from types import SimpleNamespace
+from typing import Mapping
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
