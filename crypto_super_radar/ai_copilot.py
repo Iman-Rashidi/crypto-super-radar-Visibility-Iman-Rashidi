@@ -49,8 +49,8 @@ def _candidate_table(candidates: list[dict[str, Any]]) -> str:
             "این به معنی صفر بودن فرصت‌های بازار نیست؛ یعنی دادهٔ نامزد معتبر در گزارش موجود نیست."
         )
     rows = [
-        "| نام | نماد | شبکه | قیمت USD | نقدینگی USD | وضعیت امنیتی | امتیاز ریسک |",
-        "|---|---|---|---:|---:|---|---:|",
+        "| نام | نماد | شبکه | قرارداد | قیمت USD | نقدینگی USD | وضعیت امنیتی | امتیاز ریسک |",
+        "|---|---|---|---|---:|---:|---|---:|",
     ]
     for item in candidates[:10]:
         if not isinstance(item, dict):
@@ -58,11 +58,12 @@ def _candidate_table(candidates: list[dict[str, Any]]) -> str:
         name = _value(item.get("name"))
         symbol = _value(item.get("symbol"))
         chain = _value(item.get("chain"))
+        contract = _value(item.get("contract_address_short"))
         price = _value(item.get("price_usd"))
         liquidity = _value(item.get("liquidity_usd"))
         security = _value(item.get("security_status"))
         risk = _value(item.get("risk_score"))
-        rows.append(f"| {name} | {symbol} | {chain} | {price} | {liquidity} | {security} | {risk} |")
+        rows.append(f"| {name} | {symbol} | {chain} | {contract} | {price} | {liquidity} | {security} | {risk} |")
     return "\n".join(rows)
 
 
@@ -89,9 +90,19 @@ def _gem_hunter_answer(context: dict[str, Any]) -> str:
     for item in candidates[:5]:
         if not isinstance(item, dict):
             continue
-        reasons = item.get("reason_fa")
+        symbol = _value(item.get("symbol"))
+        security = _value(item.get("security_status"))
+        lines.append(
+            f"- **{symbol}**: Mint فعال={_value(item.get('mint_authority_active'))}؛ "
+            f"Freeze فعال={_value(item.get('freeze_authority_active'))}؛ "
+            f"Honeypot={_value(item.get('honeypot_detected'))}؛ "
+            f"مالیات فروش={_value(item.get('sell_tax_pct'), '%')}؛ "
+            f"حجم ۲۴ساعته={_value(item.get('volume_24h_usd'))}؛ "
+            f"وضعیت امنیتی={security}."
+        )
+        reasons = item.get("security_reason_fa") or item.get("reason_fa")
         if reasons:
-            lines.append(f"- دلیل ثبت‌شده برای {_value(item.get('symbol'))}: {_value(reasons)}")
+            lines.append(f"  - شواهد/دلیل ثبت‌شده: {_value(reasons)}")
     return "\n".join(lines)
 
 
