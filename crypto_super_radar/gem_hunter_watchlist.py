@@ -295,14 +295,14 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
                     continue
                 profit_eur = 100.0 * (latest / initial - 1.0)
                 message = (
-                    "💰 گزارش سود واچ‌لیست رادار\\n"
-                    f"🎯 سطح سود ثبت‌شده: +{milestone}% (معادل +€{milestone} روی مبنای €100)\\n"
-                    f"🪙 دارایی: {item.get('token_name') or 'نامشخص'} ({item.get('token_symbol') or '?'}) · {item.get('chain') or 'نامشخص'}\\n"
-                    f"📈 تغییر از اولین کشف: +{change_pct:.2f}%\\n"
-                    f"💶 ارزش فرضی €100: €{100.0+profit_eur:.2f} · سود: +€{profit_eur:.2f}\\n"
-                    f"💵 قیمت اولیه: ${initial:.12g} · قیمت فعلی: ${latest:.12g}\\n"
-                    f"🕒 اولین کشف UTC: {item.get('first_detected_utc') or 'نامشخص'}\\n"
-                    f"آدرس: {item.get('token_address') or ''}\\n"
+                    "💰 گزارش سود واچ‌لیست رادار\n"
+                    f"🎯 سطح سود ثبت‌شده: +{milestone}% (معادل +€{milestone} روی مبنای €100)\n"
+                    f"🪙 دارایی: {item.get('token_name') or 'نامشخص'} ({item.get('token_symbol') or '?'}) · {item.get('chain') or 'نامشخص'}\n"
+                    f"📈 تغییر از اولین کشف: +{change_pct:.2f}%\n"
+                    f"💶 ارزش فرضی €100: €{100.0+profit_eur:.2f} · سود: +€{profit_eur:.2f}\n"
+                    f"💵 قیمت اولیه: ${initial:.12g} · قیمت فعلی: ${latest:.12g}\n"
+                    f"🕒 اولین کشف UTC: {item.get('first_detected_utc') or 'نامشخص'}\n"
+                    f"آدرس: {item.get('token_address') or ''}\n"
                     "⚠️ این گزارش تغییر قیمت از زمان کشف است؛ سود تحقق‌یافته نیست و کارمزد، مالیات و لغزش را لحاظ نمی‌کند. ربات هیچ معامله‌ای انجام نداده است."
                 )
                 try:
@@ -331,11 +331,11 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
             continue
         drawdown_pct = (latest / peak - 1.0) * 100.0
         message = (
-            "⚠️ هشدار افت از سقف واچ‌لیست Gem Hunter\\n"
-            f"🪙 دارایی: {item.get('token_name') or 'نامشخص'} ({item.get('token_symbol') or '?'}) · {item.get('chain') or 'نامشخص'}\\n"
-            f"📉 افت از سقف ثبت‌شده: {drawdown_pct:.2f}% (آستانه هشدار: -30%)\\n"
-            f"🏔️ قیمت سقف: ${peak:.12g} · قیمت فعلی: ${latest:.12g}\\n"
-            f"آدرس: {item.get('token_address') or ''}\\n"
+            "⚠️ هشدار افت از سقف واچ‌لیست Gem Hunter\n"
+            f"🪙 دارایی: {item.get('token_name') or 'نامشخص'} ({item.get('token_symbol') or '?'}) · {item.get('chain') or 'نامشخص'}\n"
+            f"📉 افت از سقف ثبت‌شده: {drawdown_pct:.2f}% (آستانه هشدار: -30%)\n"
+            f"🏔️ قیمت سقف: ${peak:.12g} · قیمت فعلی: ${latest:.12g}\n"
+            f"آدرس: {item.get('token_address') or ''}\n"
             "این هشدار صرفاً اطلاع‌رسانی است؛ به معنی اجرای معامله یا تحقق زیان نیست."
         )
         try:
