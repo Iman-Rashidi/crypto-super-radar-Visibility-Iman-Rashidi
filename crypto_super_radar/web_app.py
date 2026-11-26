@@ -8163,8 +8163,8 @@ class Handler(BaseHTTPRequestHandler):
                 const result=await response.json();
                 const messages={
                   CONNECTED_READ_ONLY:'اتصال Demo برقرار است؛ درخواست‌های این مسیر فقط GET هستند. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'.',
-                  NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
-                  AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
+                  NOT_CONFIGURED:result.message_fa||'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
+                  AUTH_FAILED:result.message_fa||'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
                   CONNECTION_FAILED:result.message_fa||'درخواست خواندن از BloFin کامل نشد.',
                   UNKNOWN:result.message_fa||'نتیجه آزمون نامشخص است؛ جزئیات فنی ثبت شده است.'
                 };
