@@ -203,6 +203,36 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     if approval_age < -30 or approval_age > 300:
         return False, "The reviewer approval is outside the five-minute validity window."
 
+    technical_approved_for_executor = (
+        side in {"LONG", "SHORT"}
+        and (
+            easy_demo_entry
+            or (
+                wave_phase in allowed_phases
+                and wave_direction == expected_direction
+            )
+        )
+    )
+
+    demo_advisory_mode = (
+        execution_profile == "CHALLENGE_1_V2"
+        and str(os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "")).strip().lower() == "true"
+        and str(os.getenv("BLOFIN_LIVE_ENABLED", "")).strip().lower() != "true"
+    )
+    if demo_advisory_mode:
+        advisory_ready = (
+            consensus.get("demo_advisory_mode") is True
+            and consensus.get("reviewer_approved") is True
+            and consensus.get("technical_approved") is True
+            and consensus.get("expected_side") == side
+            and consensus.get("reviewed_signal_id") == signal_id
+            and technical_approved_for_executor
+        )
+        if not advisory_ready:
+            return False, "Demo advisory approval is missing or not technically bound to this signal."
+        return True, "Technical V2 approval accepted; Groq vote retained as advisory telemetry."
+
     if execution_profile == "CHALLENGE_1_V2":
         required_groq_consensus = (
             consensus.get("status") == "APPROVED_BY_GROQ"

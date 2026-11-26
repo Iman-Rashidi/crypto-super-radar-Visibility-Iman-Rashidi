@@ -353,21 +353,152 @@ def run_challenge1_v2_supervisor_reviews(
     second_reviewer: Callable[..., dict[str, Any]] | None = None,
     single_reviewer: bool = True,
 ) -> dict[str, Any]:
-    """Run optional AI review as advisory telemetry; it can never veto quantitative entries."""
+    """Review Challenge 1 V2; Groq is advisory-only only in explicitly enabled Demo."""
     del primary_reviewer, single_reviewer
     reviewed_at = datetime.now(timezone.utc).isoformat()
+    signal_value = getattr(analysis, "signal", "UNKNOWN")
+    expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").strip().upper()
+    metrics = getattr(analysis, "metrics", {})
+    metrics = metrics if isinstance(metrics, dict) else {}
+    evidence = metrics.get("challenge1_v2_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    wave = evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, dict) else {}
+    expected_wave_phase = _ai._normalize_v2_phase(wave.get("phase"))
+    expected_wave_direction = _ai._normalize_v2_direction(wave.get("pattern"))
+    easy_demo_entry = (
+        os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "").strip().lower() == "true"
+        and os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+    )
+    # Demo advisory mode: Groq remains advisory-only, never blocks demo entry.
+    # SAFETY: never active when BLOFIN_LIVE_ENABLED=true, regardless of other flags.
+    demo_advisory_mode = (
+        os.getenv("CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE", "").strip().lower() == "true"
+        and os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+        and os.getenv("BLOFIN_LIVE_ENABLED", "").strip().lower() != "true"
+    )
+    technical_approved = (
+        expected_side in {"LONG", "SHORT"}
+        and (
+            easy_demo_entry
+            or (
+                expected_wave_phase in {
+                    "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+                    "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+                }
+                and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+            )
+        )
+    )
     try:
         reviewer = second_reviewer or _ai.run_independent_ai_supervisor
-        review = reviewer(analysis, asset, review_role=_groq_historical_review_role(asset))
-        if not isinstance(review, dict): review = {"status": "INVALID_RESPONSE"}
+        groq = reviewer(analysis, asset, review_role=_groq_historical_review_role(asset))
+        if not isinstance(groq, dict):
+            groq = {"status": "INVALID_RESPONSE"}
     except Exception as exc:
-        review = {"status": "ERROR", "error_type": type(exc).__name__}
-    review = dict(review)
-    review.update({"observation_only": True, "execution_effect": "ADVISORY_ONLY", "reviewed_signal_id": str(signal_id or ""), "reviewed_at_utc": reviewed_at})
-    consensus = {"status": "ADVISORY_ONLY", "decision": "NO_ENTRY_VETO", "entry_gate_enforced": False, "reviewer_status": str(review.get("status") or "UNKNOWN")}
-    return {"approved": True, "advisory_only": True, "status": "ADVISORY_ONLY", "ai_status": "ADVISORY_ONLY",
-            "ai_review": review, "second_ai_review": None, "ai_reviews": [{"reviewer_id": "groq", "review": review}],
-            "ai_consensus": consensus, "elliott_evidence_snapshot": {}, "reason_fa": "AI review is advisory and cannot block quantitative entries."}
+        groq = {"status": "ERROR", "error_type": type(exc).__name__}
+    groq = dict(groq)
+    provider = str(groq.get("provider") or "").strip().casefold()
+    model = str(groq.get("model") or "").strip()
+    returned_model = str(groq.get("returned_model") or "").strip()
+    model_identity = normalize_groq_model_id(model)
+    returned_identity = normalize_groq_model_id(returned_model)
+    allowed_models = {normalize_groq_model_id(item) for item in GROQ_ALLOWED_MODELS}
+    provider_is_groq = "groq" in provider
+    model_is_groq_allowlisted = model_identity in allowed_models and returned_identity == model_identity
+    verified = (
+        groq.get("request_attempted") is True
+        and str(groq.get("response_source") or "").strip().upper() == "LIVE_API"
+        and groq.get("response_validated") is True
+        and groq.get("model_verified") is True
+    )
+    wave_match = (
+        _ai._normalize_v2_phase(groq.get("elliott_wave_phase")) == expected_wave_phase
+        and _ai._normalize_v2_direction(groq.get("elliott_wave_direction")) == expected_wave_direction
+    )
+    side_match = (
+        str(groq.get("expected_side") or "").strip().upper() == expected_side
+        and str(groq.get("trader_proposal") or "").strip().upper() == expected_side
+    )
+    groq_approval_positive = bool(
+        provider_is_groq
+        and model_is_groq_allowlisted
+        and verified
+        and wave_match
+        and side_match
+        and _demo_ai_review_approved(groq)
+    )
+    groq_vetoed = not groq_approval_positive
+
+    if demo_advisory_mode:
+        approved = technical_approved
+    else:
+        approved = technical_approved and groq_approval_positive
+
+    reviewer_status = str(groq.get("status") or "UNKNOWN").strip().upper()
+    if reviewer_status in {"VETO", "REJECT"} and not demo_advisory_mode:
+        approved = False
+    if demo_advisory_mode and approved:
+        reviewer_status = (
+            "APPROVED_WITH_GROQ_ADVISORY"
+            if not groq_vetoed else "APPROVED_WITH_GROQ_ADVISORY_VETO"
+        )
+    elif approved:
+        reviewer_status = "APPROVED"
+    elif not groq_approval_positive:
+        reviewer_status = "VETO" if reviewer_status in {"VETO", "REJECT"} else "NOT_APPROVED"
+
+    groq.update({
+        "observation_only": demo_advisory_mode,
+        "execution_effect": "ADVISORY_ONLY" if demo_advisory_mode else "ENTRY_APPROVAL_GATE",
+        "reviewed_signal_id": str(signal_id or ""),
+        "reviewed_at_utc": reviewed_at,
+        "provider_is_groq": provider_is_groq,
+        "model_is_groq_allowlisted": model_is_groq_allowlisted,
+        "verified": verified,
+        "wave_match": wave_match,
+        "side_match": side_match,
+        "groq_approval_positive": groq_approval_positive,
+        "groq_vetoed": groq_vetoed,
+        "technical_approved": technical_approved,
+        "demo_advisory_mode": demo_advisory_mode,
+    })
+    consensus = {
+        "status": reviewer_status if approved else ("VETO" if reviewer_status == "VETO" else "REJECTED"),
+        "decision": "AUTHORIZE_DEMO_EXECUTION" if approved else "BLOCK_DEMO_ENTRY",
+        "entry_gate_enforced": not demo_advisory_mode,
+        "reviewer_status": reviewer_status,
+        "reviewer_approved": approved,
+        "expected_side": expected_side,
+        "elliott_wave_phase": expected_wave_phase,
+        "elliott_wave_direction": expected_wave_direction,
+        "reviewed_signal_id": str(signal_id or ""),
+        "reviewed_at_utc": reviewed_at,
+        "groq_approval_positive": groq_approval_positive,
+        "groq_vetoed": groq_vetoed,
+        "technical_approved": technical_approved,
+        "demo_advisory_mode": demo_advisory_mode,
+        "groq_approved": groq_approval_positive,
+        "verified_approval_count": int(groq_approval_positive),
+        "single_groq_reviewer_approval": groq_approval_positive,
+    }
+    return {
+        "approved": approved,
+        "advisory_only": demo_advisory_mode,
+        "status": reviewer_status,
+        "ai_status": reviewer_status,
+        "ai_review": groq,
+        "second_ai_review": None,
+        "ai_reviews": [{"reviewer_id": "groq", "review": groq}],
+        "ai_consensus": consensus,
+        "elliott_evidence_snapshot": {},
+        "reason_fa": (
+            "تأیید فنی مستقل از Groq؛ رأی Groq فقط برای سنجش کیفیت ثبت شد."
+            if demo_advisory_mode and approved else
+            "تأیید Groq و کنترل فنی برای ورود لازم است."
+            if approved else "شرایط تأیید فنی یا تأیید معتبر Groq برقرار نیست."
+        ),
+    }
 
 def _configured_providers() -> list[dict[str, Any]]:
     providers: list[dict[str, Any]] = []
