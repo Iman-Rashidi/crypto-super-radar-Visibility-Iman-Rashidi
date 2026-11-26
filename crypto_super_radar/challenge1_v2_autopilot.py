@@ -269,6 +269,7 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
                         outcome = store.record_closed_position_outcome(
                             instrument_id=inst, history_rows=closed_rows, partial_rows=partial_rows,
                             client_order_id=str(state.get("client_order_id") or ""), position_id=pid,
+                            position_confirmed_closed=True,
                         )
                         if isinstance(outcome, Mapping) and outcome.get("status") == "RECORDED":
                             history = [r for r in (partial_rows + closed_rows)
@@ -292,11 +293,27 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
                                 notifier.notify_async(
                                     f"challenge1-v2:closed:{pid}",
                                     f"🏁 معامله {inst} پایان یافت\nجهت: {state.get('side')}\nدلیل خروج: {exit_reason}\n"
-                                    f"PnL پس از کارمزد معاملاتی (پیش از Funding): {outcome.get('realized_pnl_after_reported_trading_fees')} USDT",
+                                    f"PnL خالص (شامل کارمزد و Funding): {outcome.get('net_pnl')} USDT",
                                 )
                             results.append({"position_id":pid,"status":"CLOSED_RECONCILED","exit_reason":exit_reason})
                             continue
-                        results.append({"position_id":pid,"status":str((outcome or {}).get("status") or "CLOSE_HISTORY_NOT_RECONCILED")})
+                        outcome_status = str((outcome or {}).get("status") or "CLOSE_HISTORY_NOT_RECONCILED")
+                        if outcome_status == "RECONCILE_STUCK" and notifier is not None:
+                            try:
+                                recipient = notifier.resolve_recipient()
+                                notifier.notify_async(
+                                    f"challenge1-v2:reconcile-stuck:{pid}",
+                                    f"⚠️ هشدار تطبیق BloFin: پوزیشن {inst} با شناسه {pid} پس از ۶ چرخه تطبیق نشد. "
+                                    f"وضعیت RECONCILE_STUCK ثبت شد؛ اسلات ظرفیت تا رفع مغایرت رزرو می‌ماند. "
+                                    f"گیرنده تلگرام: @{recipient['username']}",
+                                )
+                            except Exception as notify_exc:
+                                logging.getLogger(__name__).warning(
+                                    "RECONCILE_STUCK_TELEGRAM_FAILED position_id=%s error_type=%s",
+                                    pid, type(notify_exc).__name__,
+                                )
+                        results.append({"position_id":pid,"status":outcome_status,
+                            "reconcile_attempts":(outcome or {}).get("reconcile_attempts")})
                         continue
                     except Exception as exc:
                         results.append({"position_id":pid,"status":"CLOSE_HISTORY_CHECK_FAILED","error_type":type(exc).__name__})
