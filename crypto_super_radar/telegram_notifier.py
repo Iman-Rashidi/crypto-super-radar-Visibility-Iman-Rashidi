@@ -29,12 +29,22 @@ class TelegramNotifier:
         self,
         *,
         token: str | None = None,
+        chat_id: int | str | None = None,
         connection_factory: Callable[[], Any] | None = None,
         connection: Any | None = None,
         http_post: Callable[..., Any] | None = None,
         timeout: tuple[float, float] = (3.0, 5.0),
     ) -> None:
-        self.token = str(token if token is not None else os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+        self.token = str(token if token is not None else (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("CSR_TELEGRAM_BOT_TOKEN") or "")).strip()
+        configured_chat_id = chat_id
+        if configured_chat_id is None:
+            configured_chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CSR_TELEGRAM_CHAT_ID") or TARGET_CHAT_ID
+        try:
+            self.chat_id = int(str(configured_chat_id).strip())
+        except (TypeError, ValueError):
+            raise TelegramNotificationError("Telegram chat ID must be a numeric private-chat identifier.")
+        if self.chat_id != TARGET_CHAT_ID:
+            raise TelegramNotificationError("Configured Telegram chat ID does not match the approved private recipient.")
         self.connection_factory = connection_factory
         self.connection = connection
         self.http_post = http_post or requests.post
@@ -107,16 +117,16 @@ class TelegramNotifier:
             if (
                 locked is not None
                 and str(locked[0]).casefold() == TARGET_USERNAME.casefold()
-                and int(locked[1]) == TARGET_CHAT_ID
-                and int(locked[2]) == TARGET_CHAT_ID
+                and int(locked[1]) == self.chat_id
+                and int(locked[2]) == self.chat_id
             ):
                 return {
                     "username": TARGET_USERNAME,
-                    "chat_id": TARGET_CHAT_ID,
-                    "user_id": TARGET_CHAT_ID,
+                    "chat_id": self.chat_id,
+                    "user_id": self.chat_id,
                 }
 
-            chat = self._api("getChat", {"chat_id": TARGET_CHAT_ID}).get("result")
+            chat = self._api("getChat", {"chat_id": self.chat_id}).get("result")
             if not isinstance(chat, Mapping):
                 raise TelegramNotificationError("Pinned Telegram destination returned an invalid chat record.")
             try:
@@ -125,7 +135,7 @@ class TelegramNotifier:
                 raise TelegramNotificationError("Pinned Telegram destination has no valid numeric chat_id.")
             actual_username = str(chat.get("username") or "")
             if (
-                actual_chat_id != TARGET_CHAT_ID
+                actual_chat_id != self.chat_id
                 or str(chat.get("type") or "").casefold() != "private"
                 or actual_username.casefold() != TARGET_USERNAME.casefold()
             ):
@@ -143,7 +153,7 @@ class TelegramNotifier:
                     chat_id=excluded.chat_id,
                     user_id=excluded.user_id
                 """,
-                (TARGET_USERNAME, TARGET_CHAT_ID, TARGET_CHAT_ID),
+                (TARGET_USERNAME, self.chat_id, self.chat_id),
             )
             db.commit()
             locked = db.execute(

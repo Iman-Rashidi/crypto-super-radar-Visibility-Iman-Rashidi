@@ -41,7 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.CSR_TELEGRAM_BOT_TOKEN }}
+      CSR_TELEGRAM_BOT_TOKEN: ${{ secrets.CSR_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.CSR_TELEGRAM_CHAT_ID }}
+      CSR_TELEGRAM_CHAT_ID: ${{ secrets.CSR_TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
       CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED || 'true' }}
       # Easy Demo V2 worker may open entries under the four-slot executor cap; exit management remains active every cycle.
       CHALLENGE_1_V2_MANAGE_ONLY: "false"

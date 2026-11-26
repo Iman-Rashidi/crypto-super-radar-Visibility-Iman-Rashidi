@@ -71,6 +71,15 @@ class TelegramNotifierTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row, (TARGET_USERNAME, TARGET_CHAT_ID, TARGET_CHAT_ID))
 
+    def test_chat_id_alias_is_supported_and_must_match_approved_recipient(self):
+        with patch.dict("os.environ", {"CSR_TELEGRAM_CHAT_ID": str(TARGET_CHAT_ID)}, clear=True):
+            notifier = TelegramNotifier(token="test-token", connection=self.db, http_post=self.notifier.http_post)
+        self.assertEqual(notifier.resolve_recipient()["chat_id"], TARGET_CHAT_ID)
+
+        with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "22"}, clear=True):
+            with self.assertRaises(TelegramNotificationError):
+                TelegramNotifier(token="test-token", connection=self.db, http_post=self.notifier.http_post)
+
     def test_send_once_is_idempotent(self):
         first = self.notifier.send_once("trade:entry:pos-1", "entry")
         second = self.notifier.send_once("trade:entry:pos-1", "entry")

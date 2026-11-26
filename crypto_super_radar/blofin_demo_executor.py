@@ -2577,10 +2577,29 @@ class BloFinDemoEventStore:
             return {"status": status, "position_id": pid, "reconcile_attempts": attempts,
                 "rejected_rows": rejected[:5], "matched_partial_rows": len(combined)}
         total_qty = sum((x["qty"] for x in combined), Decimal("0"))
-        if abs(total_qty - expected_qty) > max(Decimal("0.000000001"), expected_qty * Decimal("0.000001")):
+        # A wider rounding allowance is permitted only after the caller has
+        # confirmed that the exact exchange position is no longer open and a
+        # CLOSED history row has been matched to this exact positionId.
+        # This never relaxes entry sizing, protective-order sizing, or risk math.
+        quantity_tolerance = max(
+            Decimal("0.000000001"),
+            expected_qty * (Decimal("0.005") if position_confirmed_closed else Decimal("0.000001")),
+        )
+        quantity_difference = abs(total_qty - expected_qty)
+        if quantity_difference > quantity_tolerance:
+            mismatch = {
+                "reason_code": "CLOSED_QUANTITY_MISMATCH",
+                "expected_quantity": str(expected_qty),
+                "observed_closed_quantity": str(total_qty),
+                "difference": str(quantity_difference),
+                "allowed_tolerance": str(quantity_tolerance),
+                "position_confirmed_closed": bool(position_confirmed_closed),
+            }
             return {"status": "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION",
                 "expected_quantity": str(expected_qty), "observed_closed_quantity": str(total_qty),
-                "rejected_rows": rejected[:5]}
+                "quantity_difference": str(quantity_difference),
+                "allowed_tolerance": str(quantity_tolerance),
+                "rejected_rows": (rejected + [mismatch])[:5]}
         net_pnl = sum((x["pnl"] for x in combined), Decimal("0"))
         reported_fee = sum((x["reported_fee"] for x in combined if x["reported_fee"] is not None), Decimal("0"))
         result = "PROFIT" if net_pnl > Decimal("0.00000001") else "LOSS" if net_pnl < Decimal("-0.00000001") else "BREAKEVEN"
@@ -2591,6 +2610,8 @@ class BloFinDemoEventStore:
             "closed_history_ids": [x["history_id"] for x in combined if x["state"] == "CLOSED"],
             "partial_history_ids": [x["history_id"] for x in combined if x["state"] == "PARTIALLY_CLOSED"],
             "expected_quantity": str(expected_qty), "observed_closed_quantity": str(total_qty),
+            "quantity_tolerance": str(quantity_tolerance),
+            "position_confirmed_closed": bool(position_confirmed_closed),
             "net_pnl": str(net_pnl), "reported_fee": str(reported_fee),
             "exchange_realized_pnl_before_trading_fees": str(net_pnl),
             "exchange_trading_fees": str(reported_fee),
