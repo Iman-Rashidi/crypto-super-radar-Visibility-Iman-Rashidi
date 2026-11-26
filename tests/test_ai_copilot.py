@@ -23,8 +23,11 @@ class LocalCopilotTests(unittest.TestCase):
                 "tier2_count": 0,
                 "top_candidates": [{
                     "name": "Example Token", "symbol": "EXT", "chain": "base",
+                    "contract_address_short": "0x1234…abcd",
                     "price_usd": 0.01, "liquidity_usd": 50000,
                     "security_status": "UNKNOWN", "risk_score": 88,
+                    "mint_authority_active": True, "freeze_authority_active": False,
+                    "honeypot_detected": False, "sell_tax_pct": 5,
                 }],
                 "trade_authorization": "NO_TRADE",
             }
@@ -34,6 +37,9 @@ class LocalCopilotTests(unittest.TestCase):
         self.assertIn("EXT", result["answer"])
         self.assertIn("UNKNOWN", result["answer"])
         self.assertIn("50000", result["answer"])
+        self.assertIn("0x1234", result["answer"])
+        self.assertIn("Mint فعال=بله", result["answer"])
+        self.assertIn("مالیات فروش=5%", result["answer"])
         self.assertIn("NO_TRADE", result["answer"])
 
     def test_challenge_answer_does_not_invent_missing_prices(self):
