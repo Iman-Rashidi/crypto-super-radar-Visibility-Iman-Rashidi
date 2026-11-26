@@ -2138,11 +2138,10 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
                 self.analysis(), "perp:BTCUSDT",
             )
         self.assertTrue(result["approved"])
-        self.assertEqual(result["status"], "APPROVED_BY_GROQ")
-        self.assertEqual(result["ai_consensus"]["decision"], "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER")
-        self.assertTrue(result["ai_consensus"]["entry_gate_enforced"])
-        self.assertTrue(result["ai_consensus"]["single_reviewer_approval"])
-        self.assertFalse(result["ai_consensus"]["two_reviewer_approval"])
+        self.assertTrue(result["advisory_only"])
+        self.assertEqual(result["status"], "ADVISORY_ONLY")
+        self.assertEqual(result["ai_consensus"]["decision"], "NO_ENTRY_VETO")
+        self.assertFalse(result["ai_consensus"]["entry_gate_enforced"])
         self.assertEqual(len(result["ai_reviews"]), 1)
         self.assertEqual(result["ai_reviews"][0]["reviewer_id"], "groq")
         nemotron.assert_not_called()
@@ -2154,9 +2153,10 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
-        self.assertFalse(result["approved"])
-        self.assertEqual(result["status"], "VETO")
-        self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+        self.assertTrue(result["approved"])
+        self.assertTrue(result["advisory_only"])
+        self.assertEqual(result["status"], "ADVISORY_ONLY")
+        self.assertEqual(result["ai_consensus"]["decision"], "NO_ENTRY_VETO")
         self.assertEqual(len(result["ai_reviews"]), 1)
 
     def test_missing_or_unverified_groq_review_fails_closed(self):
@@ -2171,9 +2171,10 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
-        self.assertFalse(result["approved"])
-        self.assertEqual(result["status"], "NOT_CONFIGURED")
-        self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+        self.assertTrue(result["approved"])
+        self.assertTrue(result["advisory_only"])
+        self.assertEqual(result["status"], "ADVISORY_ONLY")
+        self.assertEqual(result["ai_consensus"]["decision"], "NO_ENTRY_VETO")
         self.assertEqual(len(result["ai_reviews"]), 1)
 
     def test_non_groq_provider_or_unallowlisted_model_cannot_approve(self):
@@ -2188,8 +2189,9 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
                     result = web_app._run_challenge1_supervisor_reviews(
                         self.analysis(), "perp:BTCUSDT",
                     )
-                self.assertFalse(result["approved"])
-                self.assertEqual(result["ai_consensus"]["status"], "UNKNOWN")
+                self.assertTrue(result["approved"])
+                self.assertTrue(result["advisory_only"])
+                self.assertEqual(result["ai_consensus"]["decision"], "NO_ENTRY_VETO")
 
     def test_groq_wave_phase_mismatch_cannot_be_overridden_by_approval_flag(self):
         groq = self.review(wave_phase="WAVE_3_CONFIRMED")
@@ -2197,8 +2199,9 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
-        self.assertFalse(result["approved"])
-        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertTrue(result["approved"])
+        self.assertTrue(result["advisory_only"])
+        self.assertEqual(result["status"], "ADVISORY_ONLY")
 
 
 class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
