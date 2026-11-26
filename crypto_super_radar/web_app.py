@@ -3242,24 +3242,18 @@ def _blofin_challenge1_v2_performance_report() -> dict:
                  AND o.status='CLOSED' AND o.outcome_recorded_at IS NOT NULL
                  AND o.experience_id IS NOT NULL""", (challenge_id,),
         ).fetchone()
-        open_total = store._db.execute(
-            """SELECT COUNT(DISTINCT o.position_id) AS total
-               FROM blofin_demo_orders o JOIN learning_experience_events e
-                 ON e.experience_id=o.experience_id AND e.experience_sequence=1
-               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
-                 AND o.position_id IS NOT NULL AND o.position_id<>''
-                 AND o.status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED')""",
-            (challenge_id,),
-        ).fetchone()
+        # The V2 exit-state ledger is the authoritative local record of active V2 positions.
+        active_v2_positions = store.list_v2_position_exit_states(active_only=True, limit=500)
         pending_total = store._db.execute(
             """SELECT COUNT(DISTINCT o.client_order_id) AS total
                FROM blofin_demo_orders o JOIN learning_experience_events e
                  ON e.experience_id=o.experience_id AND e.experience_sequence=1
-               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
-                 AND o.status IN ('RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN')
-                    OR (e.challenge_id=? AND e.environment='BLOFIN_DEMO'
-                        AND o.position_id IS NULL AND o.status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'))""",
-            (challenge_id, challenge_id),
+               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO' AND (
+                    o.status IN ('RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN')
+                    OR (o.position_id IS NULL AND o.status IN
+                        ('ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'))
+               )""",
+            (challenge_id,),
         ).fetchone()
         decision_rows = store._db.execute(
             """SELECT payload_json FROM learning_experience_events
@@ -3284,7 +3278,7 @@ def _blofin_challenge1_v2_performance_report() -> dict:
                 experiences.append({})
         result = _challenge1_v2_demo_performance_metrics(
             orders, experiences, closed_order_count=int(closed_total["total"] if closed_total else 0),
-            open_trade_count=int(open_total["total"] if open_total else 0),
+            open_trade_count=len(active_v2_positions),
             pending_order_count=int(pending_total["total"] if pending_total else 0),
             groq_decision_counts=groq_counts, target_trade_count=50,
         )
@@ -9906,7 +9900,7 @@ async function loadBlofinInstruments(){
               render(blofinMetrics,[
                 ['معاملات بسته‌شده / هدف',fmt(b.closed_order_count)+' / '+fmt(b.target_trade_count)],
                 ['معاملات بسته‌شدهٔ معتبر',fmt(b.valid_closed_trade_count)],
-                ['موقعیت‌های باز فعلی',fmt(b.open_trade_count)],
+                ['موقعیت‌های باز ثبت‌شده در دفتر V2',fmt(b.open_trade_count)],
                 ['سفارش‌های در انتظار تطبیق',fmt(b.pending_order_count)],
                 ['نرخ برد',fmt(b.win_rate_pct,'%')],
                 ['سود/زیان ثبت‌شده پس از کارمزد معاملاتی',fmt(b.net_pnl_usdt,' USDT')],
