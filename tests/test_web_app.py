@@ -2298,6 +2298,9 @@ class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
             )
 
     def test_demo_connection_status_preserves_safe_failure_diagnostics(self):
+        class FakeHTTP403(web_app.BloFinDemoError):
+            status_code = 403
+
         class FakeBloFinReadOnly:
             def __init__(self, *, timeout):
                 self.timeout = timeout
@@ -2306,7 +2309,7 @@ class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
                 return {"readOnly": 1}
 
             def get_tickers(self, *, inst_id):
-                raise web_app.BloFinDemoHTTPError(403)
+                raise FakeHTTP403("sanitized test failure")
 
         env = {
             "BLOFIN_API_KEY": "test-unified-key",
@@ -2328,7 +2331,7 @@ class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
             self.assertEqual(result["status"], "CONNECTION_FAILED")
             self.assertEqual(result["failed_stage"], "PUBLIC_MARKET_TICKER")
             self.assertEqual(result["http_status"], 403)
-            self.assertEqual(result["error_type"], "BloFinDemoHTTPError")
+            self.assertEqual(result["error_type"], "FakeHTTP403")
             self.assertIn("HTTP 403", result["message_fa"])
             self.assertFalse(result["orders_enabled"])
             self.assertNotIn("test-unified-secret", json.dumps(result))
