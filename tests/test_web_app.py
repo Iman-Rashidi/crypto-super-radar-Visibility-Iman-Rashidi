@@ -1462,6 +1462,68 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(len(candidate["qualification"]["filters"]), 12)
         self.assertEqual(len(candidate["qualification"]["critical_gates"]), 4)
 
+    def test_challenge1_v2_demo_performance_uses_only_verified_closed_blofin_outcomes(self):
+        def experience(pnl, groq_vetoed=False, *, valid=True):
+            return {
+                "verification": {"status": "PASS" if valid else "FAIL"},
+                "environment": "BLOFIN_DEMO",
+                "challenge_id": "CHALLENGE_1_V2_BLOFIN_DEMO",
+                "decision_mode": "BOT_ONLY",
+                "events": [
+                    {"event_type": "DECISION_RECORDED", "payload": {
+                        "input_snapshot": {"ai_consensus": {"groq_vetoed": groq_vetoed}}
+                    }},
+                    {"event_type": "OUTCOME_LABELLED", "payload": {
+                        "final": True, "realized_result": "PROFIT" if pnl > 0 else "LOSS",
+                        "realized_net_pnl": pnl, "pnl_currency": "USDT",
+                        "evidence": {"trade_executed": True, "mark_to_market_pnl_used": False,
+                                     "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY"}
+                    }}
+                ]
+            }
+        orders = [
+            {"reserved_risk_usdt": "10"},
+            {"reserved_risk_usdt": "10"},
+            {"reserved_risk_usdt": "10"},
+        ]
+        experiences = [experience(10, False), experience(-5, False), experience(2, True, valid=False)]
+        result = web_app._challenge1_v2_demo_performance_metrics(
+            orders, experiences, closed_order_count=3, open_trade_count=2,
+            groq_decision_counts={"vetoed": 4, "not_vetoed": 6, "unknown": 1},
+            target_trade_count=50,
+        )
+        self.assertEqual(result["closed_order_count"], 3)
+        self.assertEqual(result["valid_closed_trade_count"], 2)
+        self.assertEqual(result["open_trade_count"], 2)
+        self.assertEqual(result["win_rate_pct"], 50.0)
+        self.assertEqual(result["net_pnl_usdt"], 5.0)
+        self.assertEqual(result["average_r"], 0.25)
+        self.assertEqual(result["groq_decision_counts"]["vetoed"], 4)
+        self.assertEqual(result["groq_closed_trade_performance"]["not_vetoed"]["closed_trade_count"], 2)
+        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 0)
+        self.assertEqual(result["rejected_or_unverified_closed_count"], 1)
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["orders_submitted"])
+
+    def test_challenge1_v2_demo_performance_reports_open_positions_when_no_trade_closed(self):
+        result = web_app._challenge1_v2_demo_performance_metrics(
+            [], [], closed_order_count=0, open_trade_count=3,
+            groq_decision_counts={"vetoed": 2, "not_vetoed": 1, "unknown": 0},
+        )
+        self.assertEqual(result["status"], "NO_CLOSED_TRADES")
+        self.assertEqual(result["closed_order_count"], 0)
+        self.assertEqual(result["open_trade_count"], 3)
+        self.assertIsNone(result["win_rate_pct"])
+        self.assertIsNone(result["net_pnl_usdt"])
+        self.assertEqual(result["groq_decision_counts"]["vetoed"], 2)
+
+    def test_challenge1_v2_demo_performance_endpoint_fails_closed_without_turso(self):
+        with patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"):
+            result = web_app._blofin_challenge1_v2_performance_report()
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["orders_submitted"])
+
     def test_paper_bot_status_is_local_and_cannot_submit_live_orders(self):
         status, _, payload = self.request("GET", "/paper-bot/status")
         result = json.loads(payload)
