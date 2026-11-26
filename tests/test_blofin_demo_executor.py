@@ -1629,6 +1629,49 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
 
 
+    def test_confirmed_closed_position_allows_only_bounded_quantity_rounding(self):
+        def create_order(pid, signal_id):
+            challenge = signal_record(signal_id=signal_id)
+            experience_id = self.store.record_challenge1_decision(
+                instrument_id="BTC-USDT", challenge_record=challenge,
+            )
+            plan = self._plan()
+            plan["experience_id"] = experience_id
+            self.assertTrue(self.store.reserve_order(plan))
+            self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="rounding-" + pid)
+            self.assertTrue(self.store.attach_position_id(experience_id, pid))
+            self.store._db.execute(
+                "UPDATE blofin_demo_orders SET entry_price=?, quantity=? WHERE client_order_id=?",
+                ("100", "100", plan["client_order_id"]),
+            )
+            opened_ms = int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000 + 5000
+            return plan, {
+                "historyId": "closed-" + pid, "positionId": pid, "instId": "BTC-USDT",
+                "positionSide": "net", "createTime": str(opened_ms),
+                "openAveragePrice": "100", "closeAveragePrice": "101",
+                "closePositions": "99.6", "maxPositions": "100", "realizedPnl": "1.25",
+            }
+
+        plan, history = create_order("rounding-pass", "rounding-pass")
+        accepted = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT", history_rows=[history],
+            client_order_id=plan["client_order_id"], position_id="rounding-pass",
+            position_confirmed_closed=True,
+        )
+        self.assertEqual(accepted["status"], "RECORDED")
+        self.assertEqual(accepted["evidence"]["quantity_tolerance"], "0.500")
+        self.assertTrue(accepted["evidence"]["position_confirmed_closed"])
+
+        plan, history = create_order("rounding-fail", "rounding-fail")
+        history["closePositions"] = "99.4"
+        rejected = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT", history_rows=[history],
+            client_order_id=plan["client_order_id"], position_id="rounding-fail",
+            position_confirmed_closed=True,
+        )
+        self.assertEqual(rejected["status"], "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION")
+        self.assertEqual(rejected["rejected_rows"][0]["reason_code"], "CLOSED_QUANTITY_MISMATCH")
+
     def test_blofin_artifact_three_positions_without_side_exact_net_pnl(self):
         fixtures = [
             ("BTC-USDT", "1000000995117", "0.0829", "60264.7", "60629.1", "25.445180074204390167", "-4.002796656"),
