@@ -9938,7 +9938,12 @@ async function loadBlofinInstruments(){
               const paper=await pr.json();
               if(!pr.ok)throw new Error('HTTP '+pr.status);
               const p=paper.performance||{};
-              paperStatus.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه Paper هنوز به حداقل تعداد نرسیده است.')+' '+(p.reason||'');
+              const paperOpenCount=paper.open_position?1:0;
+              if(Number(p.sample_size||0)===0){
+                paperStatus.textContent='هنوز معاملهٔ بسته‌شده‌ای در دفترکل Paper ثبت نشده است. موقعیت باز فعلی Paper: '+paperOpenCount+'.';
+              }else{
+                paperStatus.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه Paper هنوز به حداقل تعداد نرسیده است.');
+              }
               const feeStatus=p.fee_data_status==='COMPLETE'?'کامل':p.fee_data_status==='INCOMPLETE'?'ناقص':'بدون داده';
               const feeRows=p.fee_data_status==='INCOMPLETE'
                 ? [['اجزای کارمزد مشاهده‌شده (جمع جزئی)',fmt(p.known_recorded_fees_usd,' USD')]]
