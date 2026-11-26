@@ -59,6 +59,7 @@ from .challenge1_v2_orchestration import (
     Challenge1V2DataBlocked, analyze_challenge1_v2_market, get_fresh_execution_quote,
 )
 from .database import connect_database, connect_turso_database, storage_backend
+from .learning_experience_memory import LearningExperienceMemory, TRADE_AUTOPSY_CODES
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
 from .ai_copilot import chat as ai_copilot_chat, CopilotError
@@ -1995,6 +1996,87 @@ def _radar_runtime() -> str:
     })();
     </script>"""
 
+
+def _learning_lessons_payload_from_experiences(experiences: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a bounded Persian dashboard summary from verified experience events."""
+    lessons: list[dict[str, str]] = []
+    outcomes: list[dict[str, str]] = []
+    for experience in experiences or []:
+        if not isinstance(experience, dict):
+            continue
+        verification = experience.get("verification")
+        if not isinstance(verification, dict) or verification.get("status") != "PASS":
+            continue
+        events = experience.get("events")
+        if not isinstance(events, list):
+            continue
+        decision = next((e.get("payload") for e in events if isinstance(e, dict)
+                         and e.get("event_type") == "DECISION_RECORDED"
+                         and isinstance(e.get("payload"), dict)), {})
+        symbol = str(decision.get("symbol") or "نامشخص")[:32]
+        for event in events:
+            if not isinstance(event, dict) or not isinstance(event.get("payload"), dict):
+                continue
+            payload = event["payload"]
+            if event.get("event_type") == "LESSON_PROPOSED":
+                lesson = str(payload.get("lesson") or "").strip()[:280]
+                if lesson:
+                    lessons.append({"symbol": symbol, "lesson": lesson})
+            elif event.get("event_type") == "OUTCOME_LABELLED" and payload.get("final") is True:
+                result = str(payload.get("realized_result") or "UNKNOWN").upper()
+                result_fa = {"PROFIT": "برد", "LOSS": "باخت", "BREAKEVEN": "سربه‌سر",
+                             "NOT_EXECUTED": "اجرا نشد"}.get(result, "نامشخص")
+                evidence = payload.get("evidence")
+                autopsy = evidence.get("post_trade_autopsy") if isinstance(evidence, dict) else None
+                code = autopsy.get("diagnosis_code") if isinstance(autopsy, dict) else None
+                reason = TRADE_AUTOPSY_CODES.get(code, "علت ریشه‌ای استاندارد ثبت نشده است.")
+                outcomes.append({"symbol": symbol, "result_fa": result_fa, "reason_fa": reason})
+    return {
+        "status": "OK" if lessons or outcomes else "EMPTY",
+        "message_fa": "هنوز تجربهٔ تأییدشده یا درس ثبت‌شده‌ای در حافظه وجود ندارد." if not (lessons or outcomes)
+                      else "آخرین درس‌ها و نتیجه‌های تأییدشدهٔ حافظهٔ ربات.",
+        "lessons": lessons[-8:][::-1],
+        "outcomes": outcomes[-8:][::-1],
+    }
+
+
+def _learning_lessons_panel_html() -> str:
+    return """<section class="card" id="learning-lessons">
+      <h2>درس‌های آموخته‌شده و کالبدشکافی معاملات ربات</h2>
+      <p id="learning-lessons-status" class="muted" aria-live="polite">در حال خواندن حافظهٔ تجربی...</p>
+      <div id="learning-lessons-items" class="grid"></div>
+      <button type="button" id="learning-lessons-refresh">به‌روزرسانی درس‌ها</button>
+    </section>
+    <script>
+    (function(){
+      const status=document.getElementById('learning-lessons-status');
+      const root=document.getElementById('learning-lessons-items');
+      const button=document.getElementById('learning-lessons-refresh');
+      if(!status||!root||!button)return;
+      async function refresh(){
+        button.disabled=true;
+        try{
+          const response=await fetch('/api/learning/lessons',{cache:'no-store'});
+          const data=await response.json();
+          if(!response.ok)throw new Error('HTTP '+response.status);
+          status.textContent=data.message_fa||'گزارش حافظه در دسترس نیست.';
+          const cards=[];
+          (data.lessons||[]).forEach(item=>cards.push(['درس · '+item.symbol,item.lesson]));
+          (data.outcomes||[]).forEach(item=>cards.push([item.result_fa+' · '+item.symbol,item.reason_fa]));
+          root.replaceChildren(...cards.map(([heading,body])=>{
+            const card=document.createElement('div');card.className='metric';
+            const title=document.createElement('strong');title.textContent=heading;
+            const text=document.createElement('span');text.textContent=body;
+            card.append(title,text);return card;
+          }));
+        }catch(error){status.textContent='خواندن حافظهٔ تجربی ممکن نشد؛ داده‌ای حدس زده نمی‌شود.';}
+        finally{button.disabled=false;}
+      }
+      button.addEventListener('click',refresh);refresh();
+    })();
+    </script>"""
+
+
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
     body = (
         body.replace("<!--RADAR_GEM_HUNTER-->", _radar_panel(
@@ -2013,6 +2095,7 @@ def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
             "radar-asset-scan", "رادار اسکن اختصاصی دارایی",
             "وضعیت نهایی فقط بعد از دریافت پاسخ کامل موتور تحلیل روی رادار ثبت می‌شود."
         ))
+        .replace("<!--LEARNING_LESSONS_PANEL-->", _learning_lessons_panel_html())
     )
     return f"""<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
@@ -7753,6 +7836,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, b'{"error":"job not found"}', "application/json")
             return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/learning/lessons":
+            connection = None
+            try:
+                connection = connect_database()
+                experiences = LearningExperienceMemory(connection).recent_experiences(limit=40)
+                payload = _learning_lessons_payload_from_experiences(experiences)
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except Exception:
+                payload = {"status": "UNAVAILABLE", "message_fa": "حافظهٔ تجربی فعلاً در دسترس نیست.", "lessons": [], "outcomes": []}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            finally:
+                close = getattr(connection, "close", None)
+                if callable(close):
+                    try: close()
+                    except Exception: pass
         if parsed.path == "/paper-bot/status":
             payload = PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -9466,6 +9564,7 @@ async function loadBlofinInstruments(){
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+        <!--LEARNING_LESSONS_PANEL-->
         <section class="card" id="paper-performance">
           <h2>ارزیابی عملکرد معاملات آزمایشی</h2>
           <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت گزارش معاملات بسته‌شده...</p>
