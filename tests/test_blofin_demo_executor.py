@@ -413,8 +413,16 @@ class BloFinDemoV2OrderPlanTests(unittest.TestCase):
         review = record["ai_reviews"][0]["review"]
         review.update(elliott_wave_phase="WAVE_3_CONFIRMED", elliott_wave_direction="BULLISH",
                        returned_model="openai/gpt-oss-20b:active-revision")
-        record["ai_consensus"].update(elliott_wave_phase="WAVE_3_CONFIRMED",
-                                      elliott_wave_direction="BULLISH")
+        record["ai_consensus"].update(
+            status="APPROVED_WITH_GROQ_ADVISORY",
+            demo_advisory_mode=True,
+            reviewer_approved=True,
+            technical_approved=True,
+            expected_side="LONG",
+            reviewed_signal_id=record["signal_id"],
+            elliott_wave_phase="WAVE_3_CONFIRMED",
+            elliott_wave_direction="BULLISH",
+        )
         with patch.dict(os.environ, {"BLOFIN_DEMO_TRADING_ENABLED":"true",
                                      "CHALLENGE_1_V2_EASY_DEMO_ENTRY_MODE":"true"}):
             with patch("crypto_super_radar.blofin_demo_executor.challenge1_v2_execution_evidence_ready",
