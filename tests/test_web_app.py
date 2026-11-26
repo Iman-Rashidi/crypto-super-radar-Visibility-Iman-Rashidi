@@ -1488,13 +1488,14 @@ class WebAppHttpTests(unittest.TestCase):
         ]
         experiences = [experience(10, False), experience(-5, False), experience(2, True, valid=False)]
         result = web_app._challenge1_v2_demo_performance_metrics(
-            orders, experiences, closed_order_count=3, open_trade_count=2,
+            orders, experiences, closed_order_count=3, open_trade_count=2, pending_order_count=1,
             groq_decision_counts={"vetoed": 4, "not_vetoed": 6, "unknown": 1},
             target_trade_count=50,
         )
         self.assertEqual(result["closed_order_count"], 3)
         self.assertEqual(result["valid_closed_trade_count"], 2)
         self.assertEqual(result["open_trade_count"], 2)
+        self.assertEqual(result["pending_order_count"], 1)
         self.assertEqual(result["win_rate_pct"], 50.0)
         self.assertEqual(result["net_pnl_usdt"], 5.0)
         self.assertEqual(result["average_r"], 0.25)
@@ -1516,6 +1517,21 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIsNone(result["win_rate_pct"])
         self.assertIsNone(result["net_pnl_usdt"])
         self.assertEqual(result["groq_decision_counts"]["vetoed"], 2)
+
+    def test_challenge1_v2_demo_performance_get_route_returns_read_only_report(self):
+        payload = {
+            "status": "NO_CLOSED_TRADES", "closed_order_count": 0,
+            "open_trade_count": 2, "pending_order_count": 1,
+            "orders_submitted": False, "read_only": True,
+        }
+        with patch.object(web_app, "_blofin_challenge1_v2_performance_report", return_value=payload):
+            status, _, body = self.request("GET", "/api/blofin/demo/challenge1-v2/performance")
+        result = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "NO_CLOSED_TRADES")
+        self.assertEqual(result["open_trade_count"], 2)
+        self.assertEqual(result["pending_order_count"], 1)
+        self.assertFalse(result["orders_submitted"])
 
     def test_challenge1_v2_demo_performance_endpoint_fails_closed_without_turso(self):
         with patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"):
