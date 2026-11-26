@@ -3291,7 +3291,7 @@ def _blofin_challenge1_v2_performance_report() -> dict:
             result["message_fa"] += " تعداد موقعیت‌های باز فعلی: " + str(result["open_trade_count"]) + "."
         if result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"] == 0:
             result["groq_closed_trade_performance"]["vetoed"]["interpretation_fa"] = (
-                "برای تصمیم‌های veto شده، معامله‌ای اجرا نشده تا دقت نتیجهٔ معاملاتی سنجیده شود؛ این تعداد به‌تنهایی معیار صحت Groq نیست."
+                "در نمونهٔ فعلی، معاملهٔ بسته‌شده‌ای با groq_vetoed=true ثبت نشده است؛ نرخ برد این گروه با نمونهٔ صفر قابل محاسبه نیست."
             )
         return result
     except Exception as exc:
@@ -9876,7 +9876,7 @@ async function loadBlofinInstruments(){
           <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت دفترکل Paper داخلی...</p>
           <div id="paper-performance-metrics" class="grid"></div>
           <button type="button" id="paper-performance-refresh">به‌روزرسانی هر دو گزارش</button>
-          <p class="muted">گزارش BloFin فقط خروجی‌های بسته‌شده و تأییدشدهٔ تاریخچهٔ Demo را می‌سنجد. R بر اساس ریسک اولیهٔ USDT ثبت‌شده در سفارش محاسبه می‌شود. PnL پس از کارمزد معاملاتی است و تا تطبیق Funding، سود خالص پس از Funding نیست. رأی veto شدهٔ Groq معاملهٔ اجراشده محسوب نمی‌شود و بدون نتیجهٔ مستقل، دقت آن قابل ادعا نیست. Paper Bot فقط دفترکل شبیه‌سازی داخلی را می‌خواند.</p>
+          <p class="muted">گزارش BloFin فقط خروجی‌های بسته‌شده و تأییدشدهٔ تاریخچهٔ Demo را می‌سنجد. R بر اساس ریسک اولیهٔ USDT ثبت‌شده در سفارش محاسبه می‌شود. PnL پس از کارمزد معاملاتی است و تا تطبیق Funding، سود خالص پس از Funding نیست. در حالت Advisory، veto ممکن است مانع ورود نباشد؛ این گزارش نتایج واقعی معاملات بسته‌شده را جداگانه بر اساس groq_vetoed=true/false نشان می‌دهد، اما به‌تنهایی دقت مستقل مدل را اثبات نمی‌کند. Paper Bot فقط دفترکل شبیه‌سازی داخلی را می‌خواند.</p>
         </section>
         <script>
         (function(){
