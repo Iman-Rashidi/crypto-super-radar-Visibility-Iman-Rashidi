@@ -59,6 +59,45 @@ _PROVIDER_DEFINITIONS = (
 
 
 
+GROQ_VETO_STATUSES = frozenset({"VETO", "REJECT", "REJECTED"})
+
+
+def groq_decision_contract(
+    review: Any, *, demo_advisory_mode: bool,
+    technical_approved: bool, groq_approval_positive: bool, verified_groq_review: bool = False,
+) -> dict[str, Any]:
+    """Single fail-closed Groq contract shared by Challenge 1 V2 consumers.
+
+    A veto/reject is never an approval outside explicitly enabled Demo advisory
+    mode. In that Demo-only mode it remains visible as groq_vetoed telemetry.
+    """
+    raw_status = str((review or {}).get("status") or "UNKNOWN").strip().upper() if isinstance(review, dict) else "UNKNOWN"
+    explicit_veto = raw_status in GROQ_VETO_STATUSES
+    groq_vetoed = explicit_veto or not bool(groq_approval_positive)
+    advisory = bool(demo_advisory_mode)
+    approved = bool(technical_approved) if advisory else bool(
+        technical_approved and groq_approval_positive and not explicit_veto
+    )
+    if advisory and approved:
+        status = "APPROVED_WITH_GROQ_ADVISORY_VETO" if groq_vetoed else "APPROVED_WITH_GROQ_ADVISORY"
+    elif approved:
+        status = "APPROVED_BY_GROQ"
+    elif explicit_veto:
+        status = "VETO"
+    elif raw_status == "APPROVED" and verified_groq_review:
+        status = "NOT_APPROVED"
+    else:
+        status = "UNKNOWN"
+    return {
+        "approved": approved,
+        "status": status,
+        "groq_vetoed": groq_vetoed,
+        "explicit_veto": explicit_veto,
+        "demo_advisory_mode": advisory,
+        "entry_gate_enforced": not advisory,
+    }
+
+
 def _demo_ai_review_approved(review: Any) -> bool:
     """Fail closed unless a real AI review explicitly approves Demo entry."""
     if not isinstance(review, dict):
@@ -486,26 +525,15 @@ def run_challenge1_v2_supervisor_reviews(
         provider_is_groq and model_is_groq_allowlisted and verified
         and wave_match and side_match and _demo_ai_review_approved(groq)
     )
-    groq_vetoed = not groq_approval_positive
-    approved = technical_approved if demo_advisory_mode else (
-        technical_approved and groq_approval_positive
+    contract = groq_decision_contract(
+        groq, demo_advisory_mode=demo_advisory_mode,
+        technical_approved=technical_approved,
+        groq_approval_positive=groq_approval_positive,
+        verified_groq_review=provider_is_groq and model_is_groq_allowlisted and verified,
     )
-    raw_reviewer_status = str(groq.get("status") or "UNKNOWN").strip().upper()
-    if demo_advisory_mode and approved:
-        reviewer_status = (
-            "APPROVED_WITH_GROQ_ADVISORY"
-            if not groq_vetoed else "APPROVED_WITH_GROQ_ADVISORY_VETO"
-        )
-    elif approved:
-        reviewer_status = "APPROVED_BY_GROQ"
-    elif raw_reviewer_status in {"VETO", "REJECT", "REJECTED"}:
-        reviewer_status = "VETO"
-    elif provider_is_groq and model_is_groq_allowlisted and verified and (
-        raw_reviewer_status == "APPROVED" and (not wave_match or not side_match or not technical_approved)
-    ):
-        reviewer_status = "NOT_APPROVED"
-    else:
-        reviewer_status = "UNKNOWN"
+    groq_vetoed = contract["groq_vetoed"]
+    approved = contract["approved"]
+    reviewer_status = contract["status"]
 
     groq.update({
         "observation_only": demo_advisory_mode,
