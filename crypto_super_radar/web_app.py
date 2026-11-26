@@ -8138,6 +8138,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/challenge1-v2/performance":
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip()
+            if not expected_token:
+                return self._send(503, json.dumps({
+                    "status": "ACCESS_NOT_CONFIGURED",
+                    "message_fa": "توکن دسترسی پنل برای مشاهدهٔ گزارش خصوصی BloFin Demo تنظیم نشده است.",
+                    "orders_submitted": False, "read_only": True,
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                return self._send(401, json.dumps({
+                    "status": "UNAUTHORIZED",
+                    "message_fa": "برای مشاهدهٔ گزارش BloFin Demo، توکن معتبر پنل را وارد کن.",
+                    "orders_submitted": False, "read_only": True,
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             payload = _blofin_challenge1_v2_performance_report()
             status_code = 200 if payload.get("status") != "UNAVAILABLE" else 503
             return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
@@ -9884,36 +9897,46 @@ async function loadBlofinInstruments(){
           }
           async function refresh(){
             button.disabled=true;
-            blofinStatus.textContent='در حال دریافت گزارش BloFin Demo از Turso...';
+            const token=String((document.getElementById('blofin-dashboard-token')||{}).value||'').trim();
+            if(!token){
+              blofinStatus.textContent='برای مشاهدهٔ گزارش خصوصی BloFin Demo، ابتدا توکن پنل را در کادر بالای بخش حساب وارد کن.';
+            }else{
+              blofinStatus.textContent='در حال دریافت گزارش BloFin Demo از Turso...';
+              try{
+                const br=await fetch('/api/blofin/demo/challenge1-v2/performance',{
+                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const b=await br.json();
+                if(!br.ok)throw new Error(b.message_fa||('HTTP '+br.status));
+                blofinStatus.textContent=b.status==='NO_CLOSED_TRADES'
+                  ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز ثبت‌شده در دفتر V2: '+b.open_trade_count+' · سفارش‌های در انتظار تطبیق: '+b.pending_order_count+'.'
+                  : (b.message_fa||'گزارش BloFin Demo دریافت شد.')+' · وضعیت: '+b.status;
+                const g=b.groq_closed_trade_performance||{},d=b.groq_decision_counts||{};
+                render(blofinMetrics,[
+                  ['معاملات بسته‌شده / هدف',fmt(b.closed_order_count)+' / '+fmt(b.target_trade_count)],
+                  ['معاملات بسته‌شدهٔ معتبر',fmt(b.valid_closed_trade_count)],
+                  ['موقعیت‌های باز ثبت‌شده در دفتر V2',fmt(b.open_trade_count)],
+                  ['سفارش‌های در انتظار تطبیق',fmt(b.pending_order_count)],
+                  ['نرخ برد',fmt(b.win_rate_pct,'%')],
+                  ['سود/زیان ثبت‌شده پس از کارمزد معاملاتی',fmt(b.net_pnl_usdt,' USDT')],
+                  ['میانگین R',fmt(b.average_r)+' · نمونهٔ R: '+fmt(b.r_sample_size)],
+                  ['تصمیم‌های Groq · veto=true',fmt(d.vetoed)+' · معاملات بسته‌شده: '+fmt(g.vetoed&&g.vetoed.closed_trade_count)],
+                  ['نتایج veto=true',fmt(g.vetoed&&g.vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.vetoed&&g.vetoed.net_pnl_usdt,' USDT')],
+                  ['تصمیم‌های Groq · veto=false',fmt(d.not_vetoed)+' · معاملات بسته‌شده: '+fmt(g.not_vetoed&&g.not_vetoed.closed_trade_count)],
+                  ['نتایج veto=false',fmt(g.not_vetoed&&g.not_vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.not_vetoed&&g.not_vetoed.net_pnl_usdt,' USDT')],
+                  ['وضعیت دادهٔ Groq نامشخص',fmt(d.unknown)],
+                  ['معاملات بسته‌شدهٔ ردشده در اعتبارسنجی',fmt(b.rejected_or_unverified_closed_count)]
+                ]);
+                if(g.vetoed&&g.vetoed.interpretation_fa)blofinStatus.textContent+=' '+g.vetoed.interpretation_fa;
+              }catch(error){
+                blofinStatus.textContent='گزارش BloFin Demo دریافت نشد: '+String(error.message||error);
+              }
+            }
             paperStatus.textContent='در حال دریافت گزارش Paper Bot...';
             try{
-              const [br,pr]=await Promise.all([
-                fetch('/api/blofin/demo/challenge1-v2/performance',{cache:'no-store'}),
-                fetch('/paper-bot/status',{cache:'no-store'})
-              ]);
-              const [b,paper]=await Promise.all([br.json(),pr.json()]);
-              if(!br.ok)throw new Error('BloFin Demo HTTP '+br.status+' · '+(b.message_fa||'گزارش در دسترس نیست'));
-              blofinStatus.textContent=b.status==='NO_CLOSED_TRADES'
-                ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز فعلی: '+b.open_trade_count+' · سفارش‌های در انتظار تطبیق: '+b.pending_order_count+'.'
-                : (b.message_fa||'گزارش BloFin Demo دریافت شد.')+' · وضعیت: '+b.status;
-              const g=b.groq_closed_trade_performance||{},d=b.groq_decision_counts||{};
-              render(blofinMetrics,[
-                ['معاملات بسته‌شده / هدف',fmt(b.closed_order_count)+' / '+fmt(b.target_trade_count)],
-                ['معاملات بسته‌شدهٔ معتبر',fmt(b.valid_closed_trade_count)],
-                ['موقعیت‌های باز ثبت‌شده در دفتر V2',fmt(b.open_trade_count)],
-                ['سفارش‌های در انتظار تطبیق',fmt(b.pending_order_count)],
-                ['نرخ برد',fmt(b.win_rate_pct,'%')],
-                ['سود/زیان ثبت‌شده پس از کارمزد معاملاتی',fmt(b.net_pnl_usdt,' USDT')],
-                ['میانگین R',fmt(b.average_r)+' · نمونهٔ R: '+fmt(b.r_sample_size)],
-                ['تصمیم‌های Groq · veto=true',fmt(d.vetoed)+' · معاملات بسته‌شده: '+fmt(g.vetoed&&g.vetoed.closed_trade_count)],
-                ['نتایج veto=true',fmt(g.vetoed&&g.vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.vetoed&&g.vetoed.net_pnl_usdt,' USDT')],
-                ['تصمیم‌های Groq · veto=false',fmt(d.not_vetoed)+' · معاملات بسته‌شده: '+fmt(g.not_vetoed&&g.not_vetoed.closed_trade_count)],
-                ['نتایج veto=false',fmt(g.not_vetoed&&g.not_vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.not_vetoed&&g.not_vetoed.net_pnl_usdt,' USDT')],
-                ['وضعیت دادهٔ Groq نامشخص',fmt(d.unknown)],
-                ['معاملات بسته‌شدهٔ ردشده در اعتبارسنجی',fmt(b.rejected_or_unverified_closed_count)]
-              ]);
-              if(g.vetoed&&g.vetoed.interpretation_fa)blofinStatus.textContent+=' '+g.vetoed.interpretation_fa;
-              if(!pr.ok)throw new Error('Paper Bot HTTP '+pr.status);
+              const pr=await fetch('/paper-bot/status',{cache:'no-store'});
+              const paper=await pr.json();
+              if(!pr.ok)throw new Error('HTTP '+pr.status);
               const p=paper.performance||{};
               paperStatus.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه Paper هنوز به حداقل تعداد نرسیده است.')+' '+(p.reason||'');
               const feeStatus=p.fee_data_status==='COMPLETE'?'کامل':p.fee_data_status==='INCOMPLETE'?'ناقص':'بدون داده';
@@ -9933,8 +9956,7 @@ async function loadBlofinInstruments(){
                 ['نمونهٔ معتبر R',fmt(p.r_sample_size)+' · Expectancy R: '+fmt(p.net_expectancy_r)]
               ]);
             }catch(error){
-              if(blofinStatus.textContent.startsWith('در حال'))blofinStatus.textContent='گزارش BloFin Demo دریافت نشد: '+String(error.message||error);
-              if(paperStatus.textContent.startsWith('در حال'))paperStatus.textContent='گزارش Paper Bot دریافت نشد: '+String(error.message||error);
+              paperStatus.textContent='گزارش Paper Bot دریافت نشد: '+String(error.message||error);
             }finally{button.disabled=false;}
           }
           button.addEventListener('click',refresh);refresh();
