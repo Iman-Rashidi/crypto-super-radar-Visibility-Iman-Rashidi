@@ -1784,7 +1784,7 @@ class BloFinDemoEventStore:
 
         active_statuses = (
             "'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',"
-            "'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'"
+            "'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED','RECONCILE_STUCK'"
         )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -2315,14 +2315,14 @@ class BloFinDemoEventStore:
             unresolved_row = self._db.execute(
                 "SELECT COUNT(*) FROM blofin_demo_orders "
                 "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE',"
-                "'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED')"
+                "'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED','RECONCILE_STUCK')"
             ).fetchone()
             active_exposure_rows = self._db.execute(
                 """SELECT reserved_risk_usdt, reserved_margin_usdt
                    FROM blofin_demo_orders
                    WHERE status IN (
                        'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
-                       'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'
+                       'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED','RECONCILE_STUCK'
                    )"""
             ).fetchall()
         orders_today = int(today_row[0] or 0)
@@ -2472,266 +2472,161 @@ class BloFinDemoEventStore:
         return any(event.get("event_type") == "OUTCOME_LABELLED" for event in experience["events"])
 
     def record_closed_position_outcome(
-        self, *, instrument_id: str, history_rows: Any,
-        partial_rows: Any = None,
-        client_order_id: str | None = None,
-        position_id: str | None = None,
+        self, *, instrument_id: str, history_rows: Any, partial_rows: Any = None,
+        client_order_id: str | None = None, position_id: str | None = None,
+        position_confirmed_closed: bool = False,
     ) -> dict[str, Any] | None:
-        """Record a final Demo outcome only when the exact local order/position identity is supplied."""
+        """Reconcile exact BloFin position history; realizedPnl is net of fees and funding."""
         instrument = str(instrument_id or "").strip().upper()
-        client_order_key = str(client_order_id or "").strip()
-        requested_position_id = str(position_id or "").strip()
+        client_key = str(client_order_id or "").strip()
+        requested_pid = str(position_id or "").strip()
         if not instrument:
             return {"status": "INVALID_INSTRUMENT_ID"}
-        if not client_order_key and not requested_position_id:
-            return {
-                "status": "IDENTITY_REQUIRED",
-                "reason_code": "CLIENT_ORDER_ID_OR_POSITION_ID_REQUIRED",
-            }
-
+        if not client_key and not requested_pid:
+            return {"status": "IDENTITY_REQUIRED", "reason_code": "CLIENT_ORDER_ID_OR_POSITION_ID_REQUIRED"}
         with self._lock:
-            if client_order_key:
+            if client_key:
                 order_row = self._db.execute(
                     "SELECT * FROM blofin_demo_orders WHERE client_order_id=? AND instrument_id=? "
-                    "AND experience_id IS NOT NULL "
-                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED')",
-                    (client_order_key, instrument),
-                ).fetchone()
+                    "AND experience_id IS NOT NULL AND status IN "
+                    "('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED','RECONCILE_STUCK')",
+                    (client_key, instrument)).fetchone()
             else:
-                matched_orders = self._db.execute(
+                matches = self._db.execute(
                     "SELECT * FROM blofin_demo_orders WHERE position_id=? AND instrument_id=? "
-                    "AND experience_id IS NOT NULL "
-                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
-                    "ORDER BY created_at DESC LIMIT 2",
-                    (requested_position_id, instrument),
-                ).fetchall()
-                if len(matched_orders) > 1:
-                    return {
-                        "status": "AMBIGUOUS_LOCAL_POSITION_ID",
-                        "position_id": requested_position_id,
-                        "match_count_at_least": 2,
-                    }
-                order_row = matched_orders[0] if matched_orders else None
-
+                    "AND experience_id IS NOT NULL AND status IN "
+                    "('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED','RECONCILE_STUCK') "
+                    "ORDER BY created_at DESC LIMIT 2", (requested_pid, instrument)).fetchall()
+                if len(matches) > 1:
+                    return {"status": "AMBIGUOUS_LOCAL_POSITION_ID", "position_id": requested_pid}
+                order_row = matches[0] if matches else None
             if order_row is None:
-                return {
-                    "status": "LOCAL_ORDER_NOT_FOUND",
-                    "instrument_id": instrument,
-                    "client_order_id": client_order_key or None,
-                    "position_id": requested_position_id or None,
-                }
+                return {"status": "LOCAL_ORDER_NOT_FOUND", "instrument_id": instrument}
             order = dict(order_row)
-            saved_position_id = str(order.get("position_id") or "").strip()
-            if requested_position_id and saved_position_id != requested_position_id:
-                return {
-                    "status": "POSITION_ID_MISMATCH",
-                    "experience_id": order.get("experience_id"),
-                    "client_order_id": order.get("client_order_id"),
-                    "expected_position_id": saved_position_id or None,
-                    "received_position_id": requested_position_id,
-                }
+            pid = str(order.get("position_id") or "").strip()
+            if requested_pid and pid != requested_pid:
+                return {"status": "POSITION_ID_MISMATCH", "expected_position_id": pid, "received_position_id": requested_pid}
             if order.get("outcome_recorded_at") is not None:
-                return {
-                    "status": "ALREADY_RECORDED",
-                    "experience_id": order.get("experience_id"),
-                    "position_id": saved_position_id or None,
-                    "client_order_id": order.get("client_order_id"),
-                    "order_id": order.get("exchange_order_id"),
-                }
-
-        position_id = str(order.get("position_id") or "").strip()
-        if not position_id:
-            return {
-                "status": "WAITING_FOR_EXCHANGE_POSITION_LINK",
-                "experience_id": order.get("experience_id"),
-                "client_order_id": order.get("client_order_id"),
-            }
-        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+                return {"status": "ALREADY_RECORDED", "position_id": pid}
+        if not pid:
+            return {"status": "WAITING_FOR_EXCHANGE_POSITION_LINK"}
         try:
-            order_created_ms = int(order.get("created_at") or 0) * 1000
-            reference_entry = float(order.get("entry_price"))
-            expected_quantity = float(order.get("quantity"))
-        except (TypeError, ValueError, OverflowError):
+            created_ms = int(order.get("created_at") or 0) * 1000
+            entry = Decimal(str(order.get("entry_price")))
+            expected_qty = Decimal(str(order.get("filled_size") or order.get("quantity")))
+        except (TypeError, ValueError, ArithmeticError):
             return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
-        if not all(math.isfinite(value) and value > 0 for value in (
-            reference_entry, expected_quantity
-        )):
+        if not entry.is_finite() or entry <= 0 or not expected_qty.is_finite() or expected_qty <= 0:
             return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
-
-        # The final close record alone may represent only the last partial fill.
-        # Sum partial-close and full-close history for this exact exchange positionId.
-        combined_rows = []
-        for state, source_rows in (
-            ("PARTIALLY_CLOSED", partial_rows or []),
-            ("CLOSED", history_rows or []),
-        ):
+        combined, rejected, seen = [], [], set()
+        for state, source_rows in (("PARTIALLY_CLOSED", partial_rows or []), ("CLOSED", history_rows or [])):
             for row in source_rows:
                 if not isinstance(row, Mapping):
                     continue
-                if (
-                    str(row.get("positionId") or "") != position_id
-                    or str(row.get("instId") or "").upper() != instrument
-                    or str(row.get("side") or "").lower() != expected_side
-                ):
+                if str(row.get("positionId") or "") != pid or str(row.get("instId") or "").upper() != instrument:
                     continue
                 try:
-                    opened_ms = int(row.get("createTime") or 0)
-                    open_price = float(row.get("openAveragePrice"))
-                    close_quantity = float(row.get("closePositions"))
-                    total_quantity = float(row.get("maxPositions"))
-                    pnl = float(row.get("realizedPnl"))
-                    history_id = str(row.get("historyId") or "").strip()
-                except (TypeError, ValueError, OverflowError):
+                    opened = int(row.get("createTime") or 0)
+                    open_price = Decimal(str(row.get("openAveragePrice")))
+                    qty = Decimal(str(row.get("closePositions")))
+                    max_qty = Decimal(str(row.get("maxPositions")))
+                    pnl = Decimal(str(row.get("realizedPnl")))
+                except (TypeError, ValueError, ArithmeticError):
+                    if len(rejected) < 5:
+                        rejected.append({"reason_code": "MISSING_FIELD:NUMERIC_OR_TIME", "state": state})
                     continue
-                raw_fee = row.get("fee")
+                if not all(v.is_finite() for v in (open_price, qty, max_qty, pnl)) or qty <= 0 or max_qty < qty:
+                    if len(rejected) < 5:
+                        rejected.append({"reason_code": "QTY_INVALID", "state": state})
+                    continue
+                if opened < created_ms - 60000 or open_price <= 0 or abs(open_price-entry)/entry > Decimal("0.02"):
+                    if len(rejected) < 5:
+                        rejected.append({"reason_code": "ENTRY_PRICE_OUT_OF_TOLERANCE", "state": state})
+                    continue
+                history_id = str(row.get("historyId") or "").strip()
+                unique_id = history_id or "{}:{}:{}:{}:{}".format(
+                    pid, state, row.get("closePositions"), row.get("closeAveragePrice"), row.get("realizedPnl"))
+                if unique_id in seen:
+                    continue
+                seen.add(unique_id)
                 try:
-                    fee = float(raw_fee) if raw_fee is not None and str(raw_fee).strip() else None
-                except (TypeError, ValueError, OverflowError):
+                    fee = Decimal(str(row.get("fee"))) if row.get("fee") is not None else None
+                except (TypeError, ValueError, ArithmeticError):
                     fee = None
-                if fee is not None and not math.isfinite(fee):
-                    fee = None
-                values = (open_price, close_quantity, total_quantity, pnl)
-                if not all(math.isfinite(value) for value in values):
-                    continue
-                if (
-                    opened_ms < order_created_ms - 60_000
-                    or open_price <= 0
-                    or abs(open_price - reference_entry) / reference_entry > 0.005
-                    or close_quantity <= 0
-                    or total_quantity + 1e-9 < close_quantity
-                    or not history_id
-                ):
-                    continue
-                combined_rows.append({
-                    "history_id": history_id,
-                    "state": state,
-                    "close_quantity": close_quantity,
-                    "realized_pnl": pnl,
-                    "trading_fee": fee,
-                    "position_row": dict(row),
-                })
-        if not any(item["state"] == "CLOSED" for item in combined_rows):
-            return {
-                "status": "WAITING_FOR_FINAL_CLOSED_POSITION",
-                "experience_id": order.get("experience_id"),
-                "client_order_id": order.get("client_order_id"),
-                "position_id": position_id,
-                "matched_partial_rows": len(combined_rows),
-            }
-        quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
-        total_closed = sum(item["close_quantity"] for item in combined_rows)
-        if abs(total_closed - expected_quantity) > quantity_tolerance:
-            return {
-                "status": "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION",
-                "experience_id": order.get("experience_id"),
-                "client_order_id": order.get("client_order_id"),
-                "position_id": position_id,
-                "expected_quantity": expected_quantity,
-                "observed_closed_quantity": total_closed,
-            }
-        missing_fee_history_ids = sorted({
-            item["history_id"] for item in combined_rows
-            if item["trading_fee"] is None
-        })
-        if missing_fee_history_ids:
-            return {
-                "status": "WAITING_FOR_EXCHANGE_FEE_DATA",
-                "experience_id": order.get("experience_id"),
-                "client_order_id": order.get("client_order_id"),
-                "position_id": position_id,
-                "missing_fee_history_ids": missing_fee_history_ids,
-                "message": "Realized PnL after fees is not calculated when any matched exchange fee is missing.",
-            }
-        history_ids = sorted({item["history_id"] for item in combined_rows})
-        realized_pnl = sum(item["realized_pnl"] for item in combined_rows)
-        trading_fees = sum(float(item["trading_fee"]) for item in combined_rows)
-        net_before_funding = realized_pnl - trading_fees
-        if not math.isfinite(net_before_funding):
-            raise ValueError("Closed-position PnL after reported trading fees is not finite.")
-        result = (
-            "PROFIT" if net_before_funding > 1e-8
-            else "LOSS" if net_before_funding < -1e-8
-            else "BREAKEVEN"
-        )
+                combined.append({"history_id": unique_id, "state": state, "qty": qty, "pnl": pnl,
+                    "reported_fee": fee, "side": row.get("side"), "position_side": row.get("positionSide")})
+        if not combined or not any(x["state"] == "CLOSED" for x in combined):
+            attempts = None
+            if position_confirmed_closed:
+                with self._lock, self._db:
+                    self._db.execute(
+                        "CREATE TABLE IF NOT EXISTS blofin_demo_reconcile_attempts "
+                        "(client_order_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)")
+                    self._db.execute(
+                        "INSERT INTO blofin_demo_reconcile_attempts(client_order_id,attempts,updated_at) VALUES(?,1,?) "
+                        "ON CONFLICT(client_order_id) DO UPDATE SET attempts=attempts+1,updated_at=excluded.updated_at",
+                        (order["client_order_id"], int(time.time())))
+                    attempts = int(self._db.execute(
+                        "SELECT attempts FROM blofin_demo_reconcile_attempts WHERE client_order_id=?",
+                        (order["client_order_id"],)).fetchone()[0])
+                    if attempts >= 6:
+                        self._db.execute(
+                            "UPDATE blofin_demo_orders SET status='RECONCILE_STUCK',updated_at=? WHERE client_order_id=?",
+                            (int(time.time()), order["client_order_id"]))
+            status = "RECONCILE_STUCK" if attempts is not None and attempts >= 6 else "WAITING_FOR_FINAL_CLOSED_POSITION"
+            return {"status": status, "position_id": pid, "reconcile_attempts": attempts,
+                "rejected_rows": rejected[:5], "matched_partial_rows": len(combined)}
+        total_qty = sum((x["qty"] for x in combined), Decimal("0"))
+        if abs(total_qty - expected_qty) > max(Decimal("0.000000001"), expected_qty * Decimal("0.000001")):
+            return {"status": "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION",
+                "expected_quantity": str(expected_qty), "observed_closed_quantity": str(total_qty),
+                "rejected_rows": rejected[:5]}
+        net_pnl = sum((x["pnl"] for x in combined), Decimal("0"))
+        reported_fee = sum((x["reported_fee"] for x in combined if x["reported_fee"] is not None), Decimal("0"))
+        result = "PROFIT" if net_pnl > Decimal("0.00000001") else "LOSS" if net_pnl < Decimal("-0.00000001") else "BREAKEVEN"
+        history_ids = sorted({x["history_id"] for x in combined})
         evidence = {
-            "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
-            "instrument_id": instrument,
-            "position_id": position_id,
-            "client_order_id": str(order.get("client_order_id") or ""),
-            "history_ids": history_ids,
-            "closed_history_ids": [
-                item["history_id"] for item in combined_rows if item["state"] == "CLOSED"
-            ],
-            "partial_history_ids": [
-                item["history_id"] for item in combined_rows if item["state"] == "PARTIALLY_CLOSED"
-            ],
-            "original_order_id": order.get("exchange_order_id"),
-            "expected_quantity": expected_quantity,
-            "observed_closed_quantity": total_closed,
-            "exchange_realized_pnl_before_trading_fees": realized_pnl,
-            "exchange_trading_fees": trading_fees,
-            "realized_pnl_after_reported_trading_fees": net_before_funding,
-            "funding_fees_included": False,
-            "funding_fee_attribution": "NOT_YET_RECONCILED",
-            "decision_correctness": "UNKNOWN_PENDING_INDEPENDENT_REVIEW",
-            "mark_to_market_pnl_used": False,
-            "orders_submitted": True,
-            "trade_executed": True,
+            "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY", "instrument_id": instrument, "position_id": pid,
+            "client_order_id": str(order.get("client_order_id") or ""), "history_ids": history_ids,
+            "closed_history_ids": [x["history_id"] for x in combined if x["state"] == "CLOSED"],
+            "partial_history_ids": [x["history_id"] for x in combined if x["state"] == "PARTIALLY_CLOSED"],
+            "expected_quantity": str(expected_qty), "observed_closed_quantity": str(total_qty),
+            "net_pnl": str(net_pnl), "reported_fee": str(reported_fee),
+            "exchange_realized_pnl_before_trading_fees": str(net_pnl),
+            "exchange_trading_fees": str(reported_fee),
+            "realized_pnl_after_reported_trading_fees": str(net_pnl),
+            "funding_fees_included": True, "funding_fee_attribution": "INCLUDED_IN_REALIZED_PNL",
+            "side_observations": [x["side"] for x in combined],
+            "position_side_observations": [x["position_side"] for x in combined],
+            "funding_fee_included_in_realized_pnl": True, "fee_deducted_again": False,
+            "rejected_rows": rejected[:5], "mark_to_market_pnl_used": False,
         }
-        experience_id = str(order["experience_id"])
-        now = int(time.time())
+        experience_id, now = str(order["experience_id"]), int(time.time())
         with self._lock, self._db:
             latest = self._db.execute(
                 "SELECT outcome_recorded_at FROM blofin_demo_orders WHERE client_order_id=?",
-                (order["client_order_id"],),
-            ).fetchone()
+                (order["client_order_id"],)).fetchone()
             if latest is None or latest["outcome_recorded_at"] is not None:
-                return {
-                    "status": "ALREADY_RECORDED",
-                    "experience_id": experience_id,
-                    "position_id": position_id,
-                    "client_order_id": order.get("client_order_id"),
-                }
+                return {"status": "ALREADY_RECORDED"}
             saved = self.learning_memory.record_outcome(
-                experience_id=experience_id,
-                event_id=experience_id + "-outcome",
-                decision_correctness="UNKNOWN",
-                realized_result=result,
-                realized_net_pnl=net_before_funding,
-                pnl_currency="USDT",
-                final=True,
-                evidence=evidence,
-            )
+                experience_id=experience_id, event_id=experience_id + "-outcome",
+                decision_correctness="UNKNOWN", realized_result=result, realized_net_pnl=float(net_pnl),
+                pnl_currency="USDT", final=True, evidence=evidence)
             self._db.execute(
-                "UPDATE blofin_demo_orders SET status='CLOSED', outcome_recorded_at=?, "
-                "position_history_id=?, updated_at=? WHERE client_order_id=?",
-                (now, ",".join(history_ids), now, order["client_order_id"]),
+                "UPDATE blofin_demo_orders SET status='CLOSED',outcome_recorded_at=?,position_history_id=?,updated_at=? "
+                "WHERE client_order_id=?", (now, ",".join(history_ids), now, order["client_order_id"]))
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS blofin_demo_reconcile_attempts "
+                "(client_order_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)"
             )
-            self._append_event(order["client_order_id"], "CLOSED", {
-                "experience_id": experience_id,
-                "position_id": position_id,
-                "history_ids": history_ids,
-            })
+            self._db.execute("DELETE FROM blofin_demo_reconcile_attempts WHERE client_order_id=?", (order["client_order_id"],))
             self._append_event(order["client_order_id"], "OUTCOME_RECORDED", {
-                "experience_id": experience_id,
-                "position_id": position_id,
-                "history_ids": history_ids,
-                "realized_result": result,
-                "realized_pnl_after_reported_trading_fees": net_before_funding,
-                "funding_fee_attribution": "NOT_YET_RECONCILED",
-            })
-        return {
-            "status": "RECORDED",
-            "experience_id": experience_id,
-            "position_id": position_id,
-            "client_order_id": str(order.get("client_order_id") or ""),
-            "order_id": str(order.get("exchange_order_id") or ""),
-            "history_ids": history_ids,
-            "realized_result": result,
-            "realized_pnl_after_reported_trading_fees": net_before_funding,
-            "funding_fee_attribution": "NOT_YET_RECONCILED",
-            "learning_memory_status": saved.get("event_type"),
-        }
+                "history_ids": history_ids, "net_pnl": str(net_pnl), "reported_fee": str(reported_fee)})
+        return {"status": "RECORDED", "experience_id": experience_id, "position_id": pid,
+            "client_order_id": str(order.get("client_order_id") or ""), "history_ids": history_ids,
+            "realized_result": result, "net_pnl": str(net_pnl), "reported_fee": str(reported_fee),
+            "realized_pnl_after_reported_trading_fees": str(net_pnl),
+            "learning_memory_status": saved.get("event_type"), "rejected_rows": rejected[:5]}
 
     def orders_pending_learning_outcome(self, *, limit: int = 50) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 200))
