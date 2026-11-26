@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import unittest
+from unittest.mock import patch
 from crypto_super_radar.challenge1_v2_autopilot import SYMBOLS,TABLE,preflight_errors,run_cycle,manage_open_positions,build_v2_demo_risk_policy
 from crypto_super_radar.challenge1_v2_trade_controls import v2_entry_capacity
 from crypto_super_radar.blofin_demo_executor import BloFinDemoExecutor
@@ -66,6 +67,31 @@ class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
         self.assertEqual(tuple(seen),SYMBOLS); self.assertEqual(payload["status"],"CYCLE_COMPLETED")
         self.assertFalse(payload["orders_submitted"]); self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0],5)
         db.close()
+    def test_csr_telegram_token_alias_initializes_notifier(self):
+        db = sqlite3.connect(":memory:")
+        env = {
+            "CSR_TELEGRAM_BOT_TOKEN": "csr-test-token",
+            "CSR_TELEGRAM_CHAT_ID": "1196927671",
+        }
+        with patch("crypto_super_radar.telegram_notifier.TelegramNotifier") as notifier_class:
+            notifier = notifier_class.return_value
+            notifier.resolve_recipient.return_value = {
+                "username": "Germany004", "chat_id": 1196927671,
+            }
+            notifier.send_once.return_value = {"status": "SENT"}
+            payload = run_cycle(
+                object(), db,
+                analyzer=lambda *_: {
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "signal": "NO_TRADE", "status": "NO_TRADE", "reason": "unit",
+                },
+                symbols=("BTC-USDT",), environ=env,
+            )
+        self.assertEqual(notifier_class.call_args.kwargs["token"], "csr-test-token")
+        self.assertEqual(notifier_class.call_args.kwargs["chat_id"], "1196927671")
+        self.assertEqual(payload["telegram_report_status"], "SENT")
+        db.close()
+
     def test_data_failure_is_blocked(self):
         db=sqlite3.connect(":memory:")
         payload=run_cycle(object(),db,analyzer=lambda *_: (_ for _ in ()).throw(ValueError()),symbols=("BTC-USDT",))
