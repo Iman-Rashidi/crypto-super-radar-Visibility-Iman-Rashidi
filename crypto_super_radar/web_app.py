@@ -9885,6 +9885,7 @@ async function loadBlofinInstruments(){
           <p class="muted">دو دفترکل مستقل هستند؛ هیچ معامله‌ای بین آن‌ها ادغام یا دوباره‌شماری نمی‌شود.</p>
           <h3>۱. عملکرد واقعی BloFin Demo · CHALLENGE_1_V2</h3>
           <p id="blofin-v2-performance-status" class="muted" aria-live="polite">در حال خواندن تاریخچهٔ BloFin Demo از Turso...</p>
+          <p id="blofin-v2-cycle-lag" class="muted" role="alert" aria-live="assertive" hidden></p>
           <div id="blofin-v2-performance-metrics" class="grid"></div>
           <h3>۲. عملکرد شبیه‌سازی داخلی · Paper Bot</h3>
           <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت دفترکل Paper داخلی...</p>
@@ -9897,9 +9898,10 @@ async function loadBlofinInstruments(){
           const button=document.getElementById('paper-performance-refresh');
           const blofinStatus=document.getElementById('blofin-v2-performance-status');
           const blofinMetrics=document.getElementById('blofin-v2-performance-metrics');
+          const blofinCycleLag=document.getElementById('blofin-v2-cycle-lag');
           const paperStatus=document.getElementById('paper-performance-status');
           const paperMetrics=document.getElementById('paper-performance-metrics');
-          if(!button||!blofinStatus||!blofinMetrics||!paperStatus||!paperMetrics)return;
+          if(!button||!blofinStatus||!blofinMetrics||!blofinCycleLag||!paperStatus||!paperMetrics)return;
           const fmt=(value,suffix='')=>value===null||value===undefined?'داده‌ای ثبت نشده':Number(value).toLocaleString(undefined,{maximumFractionDigits:4})+suffix;
           function render(target,rows){
             target.replaceChildren(...rows.map(([label,value])=>{
@@ -9922,6 +9924,10 @@ async function loadBlofinInstruments(){
                 });
                 const b=await br.json();
                 if(!br.ok)throw new Error(b.message_fa||('HTTP '+br.status));
+                blofinCycleLag.hidden=!Boolean(b.cycle_lag_warning);
+                blofinCycleLag.textContent=b.cycle_lag_warning
+                  ? (b.cycle_lag_message_fa||'هشدار: بیش از ۲۵ دقیقه از آخرین چرخه موفق گذشته است.')
+                  : '';
                 blofinStatus.textContent=b.status==='NO_CLOSED_TRADES'
                   ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز ثبت‌شده در دفتر V2: '+b.open_trade_count+' · سفارش‌های در انتظار تطبیق: '+b.pending_order_count+'.'
                   : (b.message_fa||'گزارش BloFin Demo دریافت شد.')+' · وضعیت: '+b.status;
