@@ -61,6 +61,23 @@ class LiveChartUiTests(unittest.TestCase):
                     f"{checked.stderr or checked.stdout}",
                 )
 
+    def test_rendered_homepage_contains_persian_learning_lessons_panel(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_address[1]}/", timeout=10) as response:
+                self.assertEqual(response.status, 200)
+                html = response.read().decode("utf-8")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertIn("درس‌های آموخته‌شده و کالبدشکافی معاملات ربات", html)
+        self.assertIn("/api/learning/lessons", html)
+        self.assertIn("learning-lessons-status", html)
+
     def test_main_chart_is_mobile_readable(self):
         self.assertIn("#live-candle-chart{display:block;width:100%;min-width:820px;height:480px}", self.source)
         self.assertIn('width="1440" height="560"', self.source)
