@@ -1,100 +1,77 @@
-"""Unit tests for the guarded read-only AI Copilot."""
+"""Tests for the quota-free local read-only CSR Copilot."""
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from crypto_super_radar import ai_copilot
 
 
-class CopilotGuardTests(unittest.TestCase):
-    def setUp(self):
-        with ai_copilot._LOCK:
-            ai_copilot._REQUESTS.clear()
+class LocalCopilotTests(unittest.TestCase):
+    def test_no_provider_key_is_required(self):
+        result = ai_copilot.chat("سلام", lambda: {})
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["provider"], "داخلی")
+        self.assertFalse(result["quota"]["provider_api"])
+        self.assertIsNone(result["quota"]["hourly_message_limit"])
 
-    def test_groq_existing_key_is_selected_without_new_secret(self):
-        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk_existing", "OPENROUTER_API_KEY": "or_existing"}, clear=True):
-            config = ai_copilot._provider_config()
-        self.assertEqual(config["provider"], "Groq")
-        self.assertEqual(config["key"], "gsk_existing")
-        self.assertEqual(config["model"], "openai/gpt-oss-20b")
+    def test_gem_hunter_answer_uses_real_context_fields(self):
+        context = {
+            "gem_hunter": {
+                "status": "OK",
+                "generated_at_utc": "2026-11-26T00:00:00Z",
+                "discovered_candidate_count": 1,
+                "tier1_count": 1,
+                "tier2_count": 0,
+                "top_candidates": [{
+                    "name": "Example Token", "symbol": "EXT", "chain": "base",
+                    "price_usd": 0.01, "liquidity_usd": 50000,
+                    "security_status": "UNKNOWN", "risk_score": 88,
+                }],
+                "trade_authorization": "NO_TRADE",
+            }
+        }
+        result = ai_copilot.chat("بهترین نامزدهای Gem Hunter کدام‌اند و چه ریسک‌هایی دارند؟", lambda: context)
+        self.assertIn("Example Token", result["answer"])
+        self.assertIn("EXT", result["answer"])
+        self.assertIn("UNKNOWN", result["answer"])
+        self.assertIn("50000", result["answer"])
+        self.assertIn("NO_TRADE", result["answer"])
 
-    def test_openrouter_existing_key_is_fallback(self):
-        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "or_existing"}, clear=True):
-            config = ai_copilot._provider_config()
-        self.assertEqual(config["provider"], "OpenRouter")
-        self.assertTrue(config["model"].endswith(":free"))
+    def test_challenge_answer_does_not_invent_missing_prices(self):
+        context = {"challenge1_v2": {"status": "OK", "five_assets": [{
+            "symbol": "BTC-USDT", "signal_raw": "LONG",
+            "entry_price": None, "stop_loss": 89000, "take_profit": None,
+        }]}}
+        result = ai_copilot.chat("وضعیت سیگنال CHALLENGE_1_V2 چیست؟", lambda: context)
+        self.assertIn("BTC-USDT", result["answer"])
+        self.assertIn("ناموجود", result["answer"])
+        self.assertIn("89000", result["answer"])
 
-    def test_no_key_fails_closed(self):
-        with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(ai_copilot.CopilotError) as caught:
-                ai_copilot.chat("سلام", lambda: {})
-        self.assertEqual(caught.exception.code, "AI_PROVIDER_NOT_CONFIGURED")
+    def test_missing_context_is_reported_without_external_request(self):
+        provider = Mock(return_value={})
+        post = Mock(side_effect=AssertionError("network call must not happen"))
+        result = ai_copilot.chat("بهترین نامزدهای Gem Hunter", provider, http_post=post)
+        self.assertIn("نامزد Gem Hunter ثبت نشده", result["answer"])
+        post.assert_not_called()
+        provider.assert_called_once()
 
-    def test_empty_and_oversized_messages_are_rejected(self):
-        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test"}, clear=True):
-            with self.assertRaises(ai_copilot.CopilotError) as empty:
-                ai_copilot.chat("  ", lambda: {})
-            with self.assertRaises(ai_copilot.CopilotError) as long:
-                ai_copilot.chat("x" * 2001, lambda: {})
+    def test_no_hourly_quota_across_many_messages(self):
+        for index in range(75):
+            result = ai_copilot.chat(f"پرسش {index}", lambda: {})
+            self.assertEqual(result["status"], "OK")
+
+    def test_message_validation(self):
+        with self.assertRaises(ai_copilot.CopilotError) as empty:
+            ai_copilot.chat("  ", lambda: {})
+        with self.assertRaises(ai_copilot.CopilotError) as long:
+            ai_copilot.chat("x" * (ai_copilot.MAX_MESSAGE_CHARS + 1), lambda: {})
         self.assertEqual(empty.exception.code, "MESSAGE_REQUIRED")
         self.assertEqual(long.exception.status, 413)
 
-    def test_rate_limit_caps_at_twenty_per_hour(self):
-        for _ in range(20):
-            ai_copilot._rate_limit("test-client", now=1000)
-        with self.assertRaises(ai_copilot.CopilotError) as caught:
-            ai_copilot._rate_limit("test-client", now=1001)
-        self.assertEqual(caught.exception.status, 429)
-
-    def test_chat_sends_only_sanitized_context_and_no_tools(self):
-        response = Mock()
-        response.json.return_value = {"choices": [{"message": {"content": "تحلیل فقط‌خواندنی"}}]}
-        response.raise_for_status.return_value = None
-        post = Mock(return_value=response)
-        context = {
-            "five_assets": [{
-                "symbol": "BTC-USDT", "signal_raw": "LONG", "entry_price": 90000,
-                "stop_loss": 89000, "take_profit": 92000,
-                "ai_votes": [
-                    {"reviewer_id": "nemotron", "provider": "OpenRouter", "opinion": "APPROVE", "reason_fa": "ساختار معتبر"},
-                    {"reviewer_id": "groq", "provider": "Groq", "opinion": "VETO", "reason_fa": "ریسک بالا"},
-                ],
-            }],
-            "gem_hunter": {"top_candidates": [{
-                "name": "Example Token", "symbol": "EXT", "chain": "base",
-                "contract_address_short": "0x1234…abcd", "price_usd": 0.01,
-                "liquidity_usd": 50000, "security_status": "UNKNOWN",
-            }]},
-        }
-        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test"}, clear=True):
-            result = ai_copilot.chat("وضعیت بازار چیست؟", lambda: context, http_post=post)
-        request = post.call_args.kwargs["json"]
-        self.assertEqual(result["answer"], "تحلیل فقط‌خواندنی")
+    def test_answers_are_read_only(self):
+        result = ai_copilot.chat("خلاصه وضعیت داشبورد", lambda: {})
         self.assertTrue(result["read_only"])
         self.assertFalse(result["orders_submitted"])
-        self.assertNotIn("tools", request)
-        self.assertIn("READ-ONLY", request["messages"][0]["content"])
-        self.assertIn("نام کامل واقعی", request["messages"][0]["content"])
-        self.assertIn("جدول فارسی", request["messages"][0]["content"])
-        self.assertIn("contract_address_short", request["messages"][0]["content"])
-        self.assertIn("liquidity_usd", request["messages"][0]["content"])
-        self.assertIn("security_status", request["messages"][0]["content"])
-        self.assertIn("ناظر فعال Groq", request["messages"][0]["content"])
-        self.assertIn("Groq", request["messages"][0]["content"])
-        self.assertIn("ناظر Nemotron", request["messages"][0]["content"])
-        self.assertIn("غیرفعال است", request["messages"][0]["content"])
-        self.assertIn("BTC-USDT", request["messages"][1]["content"])
-        self.assertIn("Example Token", request["messages"][1]["content"])
-        self.assertIn("0x1234", request["messages"][1]["content"])
-        self.assertIn('"entry_price":90000', request["messages"][1]["content"])
-        self.assertIn('"stop_loss":89000', request["messages"][1]["content"])
-
-    def test_rate_limit_is_applied_per_client(self):
-        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test"}, clear=True):
-            for _ in range(20):
-                ai_copilot._rate_limit("ip-a")
-            with self.assertRaises(ai_copilot.CopilotError):
-                ai_copilot._rate_limit("ip-a")
-            ai_copilot._rate_limit("ip-b")
+        self.assertEqual(result["provider"], "داخلی")
 
 
 if __name__ == "__main__":
