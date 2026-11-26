@@ -3121,6 +3121,184 @@ def _paper_enum_fa(value: Any) -> str:
     return _PAPER_ENUM_FA.get(normalized, normalized if normalized.isdigit() else "نامشخص")
 
 
+def _challenge1_v2_demo_performance_metrics(
+    closed_orders: list[dict], experiences: list[dict], *,
+    closed_order_count: int, open_trade_count: int,
+    groq_decision_counts: dict, target_trade_count: int = 50,
+) -> dict:
+    """Build read-only CHALLENGE_1_V2 Demo statistics from verified exchange outcomes."""
+    valid = []
+    rejected_count = 0
+    for order, experience in zip(closed_orders, experiences):
+        if not isinstance(order, dict) or not isinstance(experience, dict):
+            rejected_count += 1
+            continue
+        if (
+            experience.get("verification", {}).get("status") != "PASS"
+            or experience.get("environment") != "BLOFIN_DEMO"
+            or experience.get("challenge_id") != "CHALLENGE_1_V2_BLOFIN_DEMO"
+            or experience.get("decision_mode") != "BOT_ONLY"
+        ):
+            rejected_count += 1
+            continue
+        events = experience.get("events") or []
+        decision_event = next((item for item in events if isinstance(item, dict) and item.get("event_type") == "DECISION_RECORDED"), None)
+        outcome_event = next((item for item in events if isinstance(item, dict) and item.get("event_type") == "OUTCOME_LABELLED"), None)
+        if not decision_event or not outcome_event:
+            rejected_count += 1
+            continue
+        decision, outcome = decision_event.get("payload") or {}, outcome_event.get("payload") or {}
+        evidence = outcome.get("evidence") or {}
+        if (
+            outcome.get("final") is not True
+            or outcome.get("realized_result") not in {"PROFIT", "LOSS", "BREAKEVEN"}
+            or outcome.get("pnl_currency") != "USDT"
+            or evidence.get("trade_executed") is not True
+            or evidence.get("mark_to_market_pnl_used") is not False
+            or evidence.get("source") != "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY"
+        ):
+            rejected_count += 1
+            continue
+        try:
+            pnl = float(outcome.get("realized_net_pnl"))
+            initial_risk = float(order.get("reserved_risk_usdt"))
+        except (TypeError, ValueError, OverflowError):
+            rejected_count += 1
+            continue
+        if not math.isfinite(pnl) or not math.isfinite(initial_risk) or initial_risk <= 0:
+            rejected_count += 1
+            continue
+        r_multiple = pnl / initial_risk
+        snapshot = decision.get("input_snapshot") or {}
+        consensus = snapshot.get("ai_consensus") or {}
+        groq_vetoed = consensus.get("groq_vetoed")
+        if not isinstance(groq_vetoed, bool):
+            groq_vetoed = None
+        valid.append({"net_pnl_usdt": pnl, "r_multiple": r_multiple, "groq_vetoed": groq_vetoed})
+    wins = sum(1 for item in valid if item["net_pnl_usdt"] > 1e-8)
+    losses = sum(1 for item in valid if item["net_pnl_usdt"] < -1e-8)
+    r_values = [item["r_multiple"] for item in valid]
+    groups = {}
+    for key, label in ((True, "vetoed"), (False, "not_vetoed"), (None, "unknown")):
+        group = [item for item in valid if item["groq_vetoed"] is key]
+        group_wins = sum(1 for item in group if item["net_pnl_usdt"] > 1e-8)
+        group_losses = sum(1 for item in group if item["net_pnl_usdt"] < -1e-8)
+        groups[label] = {
+            "closed_trade_count": len(group), "win_count": group_wins, "loss_count": group_losses,
+            "win_rate_pct": group_wins / len(group) * 100.0 if group else None,
+            "net_pnl_usdt": sum(item["net_pnl_usdt"] for item in group) if group else None,
+        }
+    decisions = {
+        "vetoed": int(groq_decision_counts.get("vetoed", 0)),
+        "not_vetoed": int(groq_decision_counts.get("not_vetoed", 0)),
+        "unknown": int(groq_decision_counts.get("unknown", 0)),
+    }
+    return {
+        "status": "NO_CLOSED_TRADES" if closed_order_count == 0 else (
+            "INSUFFICIENT_SAMPLE" if len(valid) < target_trade_count else "SAMPLE_TARGET_REACHED"
+        ),
+        "source": "TURSO_BLOFIN_DEMO_POSITION_HISTORY", "execution_profile": "CHALLENGE_1_V2",
+        "closed_order_count": int(closed_order_count), "valid_closed_trade_count": len(valid),
+        "target_trade_count": int(target_trade_count), "open_trade_count": int(open_trade_count),
+        "rejected_or_unverified_closed_count": int(rejected_count),
+        "win_count": wins, "loss_count": losses, "breakeven_count": len(valid) - wins - losses,
+        "win_rate_pct": wins / len(valid) * 100.0 if valid else None,
+        "net_pnl_usdt": sum(item["net_pnl_usdt"] for item in valid) if valid else None,
+        "average_r": sum(r_values) / len(r_values) if r_values else None,
+        "r_sample_size": len(r_values), "groq_decision_counts": decisions,
+        "groq_closed_trade_performance": groups, "orders_submitted": False, "read_only": True,
+    }
+
+
+def _blofin_challenge1_v2_performance_report() -> dict:
+    """Read verified CHALLENGE_1_V2 closed Demo outcomes from Turso without touching execution."""
+    if storage_backend() != "TURSO_CLOUD_SQLITE":
+        return {"status": "UNAVAILABLE",
+                "message_fa": "گزارش اصلی فقط از دفترکل پایدار Turso خوانده می‌شود؛ اتصال Turso در دسترس نیست.",
+                "orders_submitted": False, "read_only": True}
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        challenge_id = "CHALLENGE_1_V2_BLOFIN_DEMO"
+        closed_rows = store._db.execute(
+            """SELECT o.client_order_id, o.experience_id, o.instrument_id, o.side,
+                      o.quantity, o.entry_price, o.stop_loss, o.reserved_risk_usdt, o.outcome_recorded_at
+               FROM blofin_demo_orders o
+               JOIN learning_experience_events e
+                 ON e.experience_id=o.experience_id AND e.experience_sequence=1
+               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
+                 AND o.status='CLOSED' AND o.outcome_recorded_at IS NOT NULL
+                 AND o.experience_id IS NOT NULL
+               ORDER BY o.outcome_recorded_at ASC, o.client_order_id ASC LIMIT 5000""",
+            (challenge_id,),
+        ).fetchall()
+        closed_total = store._db.execute(
+            """SELECT COUNT(DISTINCT o.client_order_id) AS total
+               FROM blofin_demo_orders o JOIN learning_experience_events e
+                 ON e.experience_id=o.experience_id AND e.experience_sequence=1
+               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
+                 AND o.status='CLOSED' AND o.outcome_recorded_at IS NOT NULL
+                 AND o.experience_id IS NOT NULL""", (challenge_id,),
+        ).fetchone()
+        open_total = store._db.execute(
+            """SELECT COUNT(DISTINCT COALESCE(NULLIF(o.position_id,''),o.client_order_id)) AS total
+               FROM blofin_demo_orders o JOIN learning_experience_events e
+                 ON e.experience_id=o.experience_id AND e.experience_sequence=1
+               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
+                 AND o.status IN ('RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
+                                  'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED')""",
+            (challenge_id,),
+        ).fetchone()
+        decision_rows = store._db.execute(
+            """SELECT payload_json FROM learning_experience_events
+               WHERE experience_sequence=1 AND event_type='DECISION_RECORDED'
+                 AND challenge_id=? AND environment='BLOFIN_DEMO'
+               ORDER BY sequence DESC LIMIT 5000""", (challenge_id,),
+        ).fetchall()
+        groq_counts = {"vetoed": 0, "not_vetoed": 0, "unknown": 0}
+        for row in decision_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+                vetoed = (payload.get("input_snapshot") or {}).get("ai_consensus", {}).get("groq_vetoed")
+            except (TypeError, ValueError, AttributeError):
+                vetoed = None
+            groq_counts["vetoed" if vetoed is True else "not_vetoed" if vetoed is False else "unknown"] += 1
+        orders = [dict(row) for row in closed_rows]
+        experiences = []
+        for order in orders:
+            try:
+                experiences.append(store.learning_memory.get_experience(str(order["experience_id"])))
+            except Exception:
+                experiences.append({})
+        result = _challenge1_v2_demo_performance_metrics(
+            orders, experiences, closed_order_count=int(closed_total["total"] if closed_total else 0),
+            open_trade_count=int(open_total["total"] if open_total else 0),
+            groq_decision_counts=groq_counts, target_trade_count=50,
+        )
+        result["message_fa"] = (
+            "هنوز معاملهٔ بسته‌شده‌ای برای CHALLENGE_1_V2 در دفترکل BloFin Demo ثبت نشده است."
+            if result["closed_order_count"] == 0 else
+            "گزارش از تاریخچهٔ واقعی موقعیت‌های BloFin Demo و خروجی‌های تأییدشدهٔ Turso ساخته شده است."
+        )
+        if result["status"] == "NO_CLOSED_TRADES":
+            result["message_fa"] += " تعداد موقعیت‌های باز فعلی: " + str(result["open_trade_count"]) + "."
+        if result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"] == 0:
+            result["groq_closed_trade_performance"]["vetoed"]["interpretation_fa"] = (
+                "برای تصمیم‌های veto شده، معامله‌ای اجرا نشده تا دقت نتیجهٔ معاملاتی سنجیده شود؛ این تعداد به‌تنهایی معیار صحت Groq نیست."
+            )
+        return result
+    except Exception as exc:
+        return {"status": "UNAVAILABLE",
+                "message_fa": "خواندن دفترکل BloFin Demo ناموفق بود؛ خطای فنی: " + type(exc).__name__,
+                "error_type": type(exc).__name__, "orders_submitted": False, "read_only": True}
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
 def _paper_tick_report_fa(cycle: dict, paper_state: dict, safety: dict) -> dict:
     """Build a Persian, user-facing report without changing trading decisions or raw API fields."""
     cycle = cycle if isinstance(cycle, dict) else {}
@@ -7952,6 +8130,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/challenge1-v2/performance":
+            payload = _blofin_challenge1_v2_performance_report()
+            status_code = 200 if payload.get("status") != "UNAVAILABLE" else 503
+            return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/futures-paper-bot/status":
             payload = FUTURES_PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -9665,32 +9848,72 @@ async function loadBlofinInstruments(){
         <!--LEARNING_LESSONS_PANEL-->
         <section class="card" id="paper-performance">
           <h2>ارزیابی عملکرد معاملات آزمایشی</h2>
-          <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت گزارش معاملات بسته‌شده...</p>
+          <p class="muted">دو دفترکل مستقل هستند؛ هیچ معامله‌ای بین آن‌ها ادغام یا دوباره‌شماری نمی‌شود.</p>
+          <h3>۱. عملکرد واقعی BloFin Demo · CHALLENGE_1_V2</h3>
+          <p id="blofin-v2-performance-status" class="muted" aria-live="polite">در حال خواندن تاریخچهٔ BloFin Demo از Turso...</p>
+          <div id="blofin-v2-performance-metrics" class="grid"></div>
+          <h3>۲. عملکرد شبیه‌سازی داخلی · Paper Bot</h3>
+          <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت دفترکل Paper داخلی...</p>
           <div id="paper-performance-metrics" class="grid"></div>
-          <button type="button" id="paper-performance-refresh">به‌روزرسانی عملکرد</button>
-          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper داخلی را می‌سنجد و معاملات حساب BloFin Demo را وارد نمی‌کند. تا ثبت حداقل ۳۰ معاملهٔ Paper، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
+          <button type="button" id="paper-performance-refresh">به‌روزرسانی هر دو گزارش</button>
+          <p class="muted">گزارش BloFin فقط خروجی‌های بسته‌شده و تأییدشدهٔ تاریخچهٔ Demo را می‌سنجد. R بر اساس ریسک اولیهٔ USDT ثبت‌شده در سفارش محاسبه می‌شود. PnL پس از کارمزد معاملاتی است و تا تطبیق Funding، سود خالص پس از Funding نیست. رأی veto شدهٔ Groq معاملهٔ اجراشده محسوب نمی‌شود و بدون نتیجهٔ مستقل، دقت آن قابل ادعا نیست. Paper Bot فقط دفترکل شبیه‌سازی داخلی را می‌خواند.</p>
         </section>
         <script>
         (function(){
-          const status=document.getElementById('paper-performance-status');
-          const metrics=document.getElementById('paper-performance-metrics');
           const button=document.getElementById('paper-performance-refresh');
-          if(!status||!metrics||!button)return;
-          const fmt=(value,suffix='')=>value===null||value===undefined?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:4})+suffix;
+          const blofinStatus=document.getElementById('blofin-v2-performance-status');
+          const blofinMetrics=document.getElementById('blofin-v2-performance-metrics');
+          const paperStatus=document.getElementById('paper-performance-status');
+          const paperMetrics=document.getElementById('paper-performance-metrics');
+          if(!button||!blofinStatus||!blofinMetrics||!paperStatus||!paperMetrics)return;
+          const fmt=(value,suffix='')=>value===null||value===undefined?'داده‌ای ثبت نشده':Number(value).toLocaleString(undefined,{maximumFractionDigits:4})+suffix;
+          function render(target,rows){
+            target.replaceChildren(...rows.map(([label,value])=>{
+              const card=document.createElement('div');card.className='metric';
+              const title=document.createElement('span');title.textContent=label;
+              const content=document.createElement('strong');content.textContent=value;
+              card.append(title,content);return card;
+            }));
+          }
           async function refresh(){
-            button.disabled=true;status.textContent='در حال دریافت دفتر معاملات آزمایشی...';
+            button.disabled=true;
+            blofinStatus.textContent='در حال دریافت گزارش BloFin Demo از Turso...';
+            paperStatus.textContent='در حال دریافت گزارش Paper Bot...';
             try{
-              const response=await fetch('/paper-bot/status',{cache:'no-store'});
-              const data=await response.json();
-              if(!response.ok)throw new Error('HTTP '+response.status);
-              const p=data.performance||{};
-              status.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه هنوز کافی نیست.')+' '+(p.reason||'');
+              const [br,pr]=await Promise.all([
+                fetch('/api/blofin/demo/challenge1-v2/performance',{cache:'no-store'}),
+                fetch('/paper-bot/status',{cache:'no-store'})
+              ]);
+              const [b,paper]=await Promise.all([br.json(),pr.json()]);
+              if(!br.ok)throw new Error('BloFin Demo HTTP '+br.status+' · '+(b.message_fa||'گزارش در دسترس نیست'));
+              blofinStatus.textContent=b.status==='NO_CLOSED_TRADES'
+                ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز فعلی: '+b.open_trade_count+'.'
+                : (b.message_fa||'گزارش BloFin Demo دریافت شد.')+' · وضعیت: '+b.status;
+              const g=b.groq_closed_trade_performance||{},d=b.groq_decision_counts||{};
+              render(blofinMetrics,[
+                ['معاملات بسته‌شده / هدف',fmt(b.closed_order_count)+' / '+fmt(b.target_trade_count)],
+                ['معاملات بسته‌شدهٔ معتبر',fmt(b.valid_closed_trade_count)],
+                ['موقعیت‌های باز فعلی',fmt(b.open_trade_count)],
+                ['نرخ برد',fmt(b.win_rate_pct,'%')],
+                ['سود/زیان ثبت‌شده پس از کارمزد معاملاتی',fmt(b.net_pnl_usdt,' USDT')],
+                ['میانگین R',fmt(b.average_r)+' · نمونهٔ R: '+fmt(b.r_sample_size)],
+                ['تصمیم‌های Groq · veto=true',fmt(d.vetoed)+' · معاملات بسته‌شده: '+fmt(g.vetoed&&g.vetoed.closed_trade_count)],
+                ['نتایج veto=true',fmt(g.vetoed&&g.vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.vetoed&&g.vetoed.net_pnl_usdt,' USDT')],
+                ['تصمیم‌های Groq · veto=false',fmt(d.not_vetoed)+' · معاملات بسته‌شده: '+fmt(g.not_vetoed&&g.not_vetoed.closed_trade_count)],
+                ['نتایج veto=false',fmt(g.not_vetoed&&g.not_vetoed.win_rate_pct,'%')+' · PnL: '+fmt(g.not_vetoed&&g.not_vetoed.net_pnl_usdt,' USDT')],
+                ['وضعیت دادهٔ Groq نامشخص',fmt(d.unknown)],
+                ['معاملات بسته‌شدهٔ ردشده در اعتبارسنجی',fmt(b.rejected_or_unverified_closed_count)]
+              ]);
+              if(g.vetoed&&g.vetoed.interpretation_fa)blofinStatus.textContent+=' '+g.vetoed.interpretation_fa;
+              if(!pr.ok)throw new Error('Paper Bot HTTP '+pr.status);
+              const p=paper.performance||{};
+              paperStatus.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه Paper هنوز به حداقل تعداد نرسیده است.')+' '+(p.reason||'');
               const feeStatus=p.fee_data_status==='COMPLETE'?'کامل':p.fee_data_status==='INCOMPLETE'?'ناقص':'بدون داده';
               const feeRows=p.fee_data_status==='INCOMPLETE'
                 ? [['اجزای کارمزد مشاهده‌شده (جمع جزئی)',fmt(p.known_recorded_fees_usd,' USD')]]
                 : [];
-              const rows=[
-                ['تعداد معاملات بسته‌شده',fmt(p.sample_size)+' / '+fmt(p.minimum_sample_size)],
+              render(paperMetrics,[
+                ['معاملات بسته‌شده / هدف',fmt(p.sample_size)+' / '+fmt(p.minimum_sample_size)],
                 ['نرخ برد',fmt(p.win_rate_pct,'%')],
                 ['امید ریاضی خالص هر معامله',fmt(p.net_expectancy_usd_per_trade,' USD')],
                 ['Profit Factor خالص',fmt(p.profit_factor_net)],
@@ -9700,15 +9923,11 @@ async function loadBlofinInstruments(){
                 ['کل کارمزد ثبت‌شده (فقط با پوشش کامل)',fmt(p.total_recorded_fees_usd,' USD')],
                 ...feeRows,
                 ['نمونهٔ معتبر R',fmt(p.r_sample_size)+' · Expectancy R: '+fmt(p.net_expectancy_r)]
-              ];
-              metrics.replaceChildren(...rows.map(([label,value])=>{
-                const card=document.createElement('div');card.className='metric';
-                const title=document.createElement('span');title.textContent=label;
-                const content=document.createElement('strong');content.textContent=value;
-                card.append(title,content);return card;
-              }));
-            }catch(error){status.textContent='گزارش عملکرد دریافت نشد: '+String(error.message||error);}
-            finally{button.disabled=false;}
+              ]);
+            }catch(error){
+              if(blofinStatus.textContent.startsWith('در حال'))blofinStatus.textContent='گزارش BloFin Demo دریافت نشد: '+String(error.message||error);
+              if(paperStatus.textContent.startsWith('در حال'))paperStatus.textContent='گزارش Paper Bot دریافت نشد: '+String(error.message||error);
+            }finally{button.disabled=false;}
           }
           button.addEventListener('click',refresh);refresh();
         })();
