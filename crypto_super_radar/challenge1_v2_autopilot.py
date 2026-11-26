@@ -11,7 +11,8 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from .ai_second_opinion import GROQ_DEFAULT_MODEL, GROQ_FALLBACK_MODEL, GROQ_ALLOWED_MODELS\nfrom .position_manager import PositionManager, ActionType
+from .ai_second_opinion import GROQ_DEFAULT_MODEL, GROQ_FALLBACK_MODEL, GROQ_ALLOWED_MODELS
+from .position_manager import PositionManager, ActionType
 
 SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 TABLE = "challenge1_v2_autopilot_cycles"
@@ -242,7 +243,40 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
                         closed.add(ts)
                 except (IndexError,TypeError,ValueError):
                     continue
-            state["candles_elapsed"]=max(int(state.get("candles_elapsed") or 0),len(closed))\n            # Quantitative PositionManager is wired into the live Demo monitor;\n            # existing exchange order identity/verification remains authoritative.\n            if candles and len(candles) >= 16:\n                try:\n                    rows = [x for x in candles if isinstance(x, (list, tuple)) and len(x) >= 6 and str(x[8] if len(x)>8 else "1")=="1"]\n                    closes = [float(x[4]) for x in rows]\n                    highs = [float(x[2]) for x in rows]\n                    lows = [float(x[3]) for x in rows]\n                    if len(closes) >= 15:\n                        deltas = [closes[i]-closes[i-1] for i in range(1,len(closes))]\n                        gains = sum(max(v,0) for v in deltas[-14:])/14\n                        losses = sum(max(-v,0) for v in deltas[-14:])/14\n                        rsi_now = 100.0 if losses==0 else 100-(100/(1+gains/losses))\n                        prev_deltas = deltas[:-1][-14:]\n                        pg = sum(max(v,0) for v in prev_deltas)/14 if prev_deltas else 0\n                        pl = sum(max(-v,0) for v in prev_deltas)/14 if prev_deltas else 0\n                        rsi_prev = 100.0 if pl==0 else 100-(100/(1+pg/pl))\n                        tr = [max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]\n                        atr14 = sum(tr[-14:])/14\n                        pm_action = PositionManager().on_tick({"side":side,"entry_price":float(entry),"initial_stop_loss":float(state["initial_stop_loss"]),"stop_loss":float(stop),"entry_time":datetime.fromtimestamp(int(state.get("entry_time_ms") or now_ms)/1000,timezone.utc).isoformat()}, {"close":float(closes[-1])}, {"rsi14":rsi_now,"previous_rsi14":rsi_prev,"atr14":atr14,"last_confirmed_swing_low":min(lows[-7:-2]) if len(lows)>=7 else None,"last_confirmed_swing_high":max(highs[-7:-2]) if len(highs)>=7 else None,"now":datetime.fromtimestamp(now_ms/1000,timezone.utc).isoformat()})\n                        if pm_action.action == ActionType.CLOSE:\n                            cid=_exit_id("PMX",pid); state.update(status="POSITION_MANAGER_CLOSE_PENDING",exit_order_id=cid,exit_reason=pm_action.reason); store.save_v2_position_exit_state(state)\n                            receipt=client.place_market_exit_reduce_only(inst_id=inst,client_order_id=cid,position_id=pid); state["position_manager_close_receipt"]=receipt; store.save_v2_position_exit_state(state)\n                            results.append({"position_id":pid,"status":"POSITION_MANAGER_CLOSE_SUBMITTED","reason":pm_action.reason}); continue\n                        if pm_action.action == ActionType.MOVE_STOP and pm_action.stop_loss is not None:\n                            tpsl=str(state.get("sl_tpsl_id") or "")\n                            if tpsl:\n                                amended=client.amend_or_replace_sl(inst_id=inst,tpsl_id=tpsl,new_stop_loss=str(pm_action.stop_loss),request_id=_exit_id("PMS",pid),position_id=pid)\n                                if amended.get("sl_verified") is True:\n                                    state.update(stop_loss=pm_action.stop_loss,position_manager_last_action=pm_action.reason); store.save_v2_position_exit_state(state)\n                except Exception as pm_exc:\n                    state["position_manager_error_type"]=type(pm_exc).__name__\n
+            state["candles_elapsed"]=max(int(state.get("candles_elapsed") or 0),len(closed))
+            # Quantitative PositionManager is wired into the live Demo monitor;
+            # existing exchange order identity/verification remains authoritative.
+            if candles and len(candles) >= 16:
+                try:
+                    rows = [x for x in candles if isinstance(x, (list, tuple)) and len(x) >= 6 and str(x[8] if len(x)>8 else "1")=="1"]
+                    closes = [float(x[4]) for x in rows]
+                    highs = [float(x[2]) for x in rows]
+                    lows = [float(x[3]) for x in rows]
+                    if len(closes) >= 15:
+                        deltas = [closes[i]-closes[i-1] for i in range(1,len(closes))]
+                        gains = sum(max(v,0) for v in deltas[-14:])/14
+                        losses = sum(max(-v,0) for v in deltas[-14:])/14
+                        rsi_now = 100.0 if losses==0 else 100-(100/(1+gains/losses))
+                        prev_deltas = deltas[:-1][-14:]
+                        pg = sum(max(v,0) for v in prev_deltas)/14 if prev_deltas else 0
+                        pl = sum(max(-v,0) for v in prev_deltas)/14 if prev_deltas else 0
+                        rsi_prev = 100.0 if pl==0 else 100-(100/(1+pg/pl))
+                        tr = [max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
+                        atr14 = sum(tr[-14:])/14
+                        pm_action = PositionManager().on_tick({"side":side,"entry_price":float(entry),"initial_stop_loss":float(state["initial_stop_loss"]),"stop_loss":float(stop),"entry_time":datetime.fromtimestamp(int(state.get("entry_time_ms") or now_ms)/1000,timezone.utc).isoformat()}, {"close":float(closes[-1])}, {"rsi14":rsi_now,"previous_rsi14":rsi_prev,"atr14":atr14,"last_confirmed_swing_low":min(lows[-7:-2]) if len(lows)>=7 else None,"last_confirmed_swing_high":max(highs[-7:-2]) if len(highs)>=7 else None,"now":datetime.fromtimestamp(now_ms/1000,timezone.utc).isoformat()})
+                        if pm_action.action == ActionType.CLOSE:
+                            cid=_exit_id("PMX",pid); state.update(status="POSITION_MANAGER_CLOSE_PENDING",exit_order_id=cid,exit_reason=pm_action.reason); store.save_v2_position_exit_state(state)
+                            receipt=client.place_market_exit_reduce_only(inst_id=inst,client_order_id=cid,position_id=pid); state["position_manager_close_receipt"]=receipt; store.save_v2_position_exit_state(state)
+                            results.append({"position_id":pid,"status":"POSITION_MANAGER_CLOSE_SUBMITTED","reason":pm_action.reason}); continue
+                        if pm_action.action == ActionType.MOVE_STOP and pm_action.stop_loss is not None:
+                            tpsl=str(state.get("sl_tpsl_id") or "")
+                            if tpsl:
+                                amended=client.amend_or_replace_sl(inst_id=inst,tpsl_id=tpsl,new_stop_loss=str(pm_action.stop_loss),request_id=_exit_id("PMS",pid),position_id=pid)
+                                if amended.get("sl_verified") is True:
+                                    state.update(stop_loss=pm_action.stop_loss,position_manager_last_action=pm_action.reason); store.save_v2_position_exit_state(state)
+                except Exception as pm_exc:
+                    state["position_manager_error_type"]=type(pm_exc).__name__
+
             current_status=str(state.get("status") or "").upper()
             if current_status=="TIME_EXIT_MARKET_PENDING":
                 market_cid=_exit_id("TMKT",pid)
