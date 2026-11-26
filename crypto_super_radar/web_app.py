@@ -3125,6 +3125,7 @@ def _challenge1_v2_demo_performance_metrics(
     closed_orders: list[dict], experiences: list[dict], *,
     closed_order_count: int, open_trade_count: int,
     groq_decision_counts: dict, target_trade_count: int = 50,
+    pending_order_count: int = 0,
 ) -> dict:
     """Build read-only CHALLENGE_1_V2 Demo statistics from verified exchange outcomes."""
     valid = []
@@ -3200,6 +3201,7 @@ def _challenge1_v2_demo_performance_metrics(
         "source": "TURSO_BLOFIN_DEMO_POSITION_HISTORY", "execution_profile": "CHALLENGE_1_V2",
         "closed_order_count": int(closed_order_count), "valid_closed_trade_count": len(valid),
         "target_trade_count": int(target_trade_count), "open_trade_count": int(open_trade_count),
+        "pending_order_count": int(pending_order_count),
         "rejected_or_unverified_closed_count": int(rejected_count),
         "win_count": wins, "loss_count": losses, "breakeven_count": len(valid) - wins - losses,
         "win_rate_pct": wins / len(valid) * 100.0 if valid else None,
@@ -3241,13 +3243,23 @@ def _blofin_challenge1_v2_performance_report() -> dict:
                  AND o.experience_id IS NOT NULL""", (challenge_id,),
         ).fetchone()
         open_total = store._db.execute(
-            """SELECT COUNT(DISTINCT COALESCE(NULLIF(o.position_id,''),o.client_order_id)) AS total
+            """SELECT COUNT(DISTINCT o.position_id) AS total
                FROM blofin_demo_orders o JOIN learning_experience_events e
                  ON e.experience_id=o.experience_id AND e.experience_sequence=1
                WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
-                 AND o.status IN ('RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
-                                  'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED')""",
+                 AND o.position_id IS NOT NULL AND o.position_id<>''
+                 AND o.status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED')""",
             (challenge_id,),
+        ).fetchone()
+        pending_total = store._db.execute(
+            """SELECT COUNT(DISTINCT o.client_order_id) AS total
+               FROM blofin_demo_orders o JOIN learning_experience_events e
+                 ON e.experience_id=o.experience_id AND e.experience_sequence=1
+               WHERE e.challenge_id=? AND e.environment='BLOFIN_DEMO'
+                 AND o.status IN ('RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN')
+                    OR (e.challenge_id=? AND e.environment='BLOFIN_DEMO'
+                        AND o.position_id IS NULL AND o.status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'))""",
+            (challenge_id, challenge_id),
         ).fetchone()
         decision_rows = store._db.execute(
             """SELECT payload_json FROM learning_experience_events
@@ -3273,6 +3285,7 @@ def _blofin_challenge1_v2_performance_report() -> dict:
         result = _challenge1_v2_demo_performance_metrics(
             orders, experiences, closed_order_count=int(closed_total["total"] if closed_total else 0),
             open_trade_count=int(open_total["total"] if open_total else 0),
+            pending_order_count=int(pending_total["total"] if pending_total else 0),
             groq_decision_counts=groq_counts, target_trade_count=50,
         )
         result["message_fa"] = (
@@ -9887,13 +9900,14 @@ async function loadBlofinInstruments(){
               const [b,paper]=await Promise.all([br.json(),pr.json()]);
               if(!br.ok)throw new Error('BloFin Demo HTTP '+br.status+' · '+(b.message_fa||'گزارش در دسترس نیست'));
               blofinStatus.textContent=b.status==='NO_CLOSED_TRADES'
-                ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز فعلی: '+b.open_trade_count+'.'
+                ? 'هنوز معاملهٔ بسته‌شده‌ای ثبت نشده است. موقعیت‌های باز فعلی: '+b.open_trade_count+' · سفارش‌های در انتظار تطبیق: '+b.pending_order_count+'.'
                 : (b.message_fa||'گزارش BloFin Demo دریافت شد.')+' · وضعیت: '+b.status;
               const g=b.groq_closed_trade_performance||{},d=b.groq_decision_counts||{};
               render(blofinMetrics,[
                 ['معاملات بسته‌شده / هدف',fmt(b.closed_order_count)+' / '+fmt(b.target_trade_count)],
                 ['معاملات بسته‌شدهٔ معتبر',fmt(b.valid_closed_trade_count)],
                 ['موقعیت‌های باز فعلی',fmt(b.open_trade_count)],
+                ['سفارش‌های در انتظار تطبیق',fmt(b.pending_order_count)],
                 ['نرخ برد',fmt(b.win_rate_pct,'%')],
                 ['سود/زیان ثبت‌شده پس از کارمزد معاملاتی',fmt(b.net_pnl_usdt,' USDT')],
                 ['میانگین R',fmt(b.average_r)+' · نمونهٔ R: '+fmt(b.r_sample_size)],
