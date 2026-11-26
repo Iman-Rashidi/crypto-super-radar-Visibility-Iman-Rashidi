@@ -16,7 +16,7 @@ ACTIVITY_URL = "https://blofin.com/activity/en"
 _ALLOWED_HOSTS = {"blofin.com", "www.blofin.com", "v3.blofin.com"}
 _DEMO_TERMS = (
     "demo trading", "demo competition", "demo account", "virtual account",
-    "simulated trading", "demo futures",
+    "simulated trading", "demo trade", "demo futures",
 )
 _LIVE_TERMS = (
     "live futures trade", "real futures trade", "real funds", "live trading",
