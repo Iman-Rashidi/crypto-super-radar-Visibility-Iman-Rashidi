@@ -227,6 +227,10 @@ class Challenge1V2EasyDemoGroqApprovalTests(unittest.TestCase):
                 analysis, "perp:BTCUSDT", signal_id="easy-demo-test"
             )
         self.assertTrue(result["approved"])
-        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_GROQ")
+        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_WITH_GROQ_ADVISORY")
+        self.assertTrue(result["ai_consensus"]["reviewer_approved"])
+        self.assertTrue(result["ai_consensus"]["technical_approved"])
+        self.assertTrue(result["ai_consensus"]["demo_advisory_mode"])
+        self.assertTrue(result["ai_consensus"]["groq_approval_positive"])
         self.assertTrue(result["ai_consensus"]["single_reviewer_approval"])
         self.assertTrue(result["ai_consensus"]["elliott_is_advisory"])

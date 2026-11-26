@@ -353,7 +353,7 @@ def run_challenge1_v2_supervisor_reviews(
     second_reviewer: Callable[..., dict[str, Any]] | None = None,
     single_reviewer: bool = True,
 ) -> dict[str, Any]:
-    """Review Challenge 1 V2; Groq is advisory-only only in explicitly enabled Demo."""
+    """Run the sole Groq V2 review, with a tightly scoped Demo advisory override."""
     del primary_reviewer, single_reviewer
     reviewed_at = datetime.now(timezone.utc).isoformat()
     signal_value = getattr(analysis, "signal", "UNKNOWN")
@@ -390,6 +390,40 @@ def run_challenge1_v2_supervisor_reviews(
             )
         )
     )
+
+    reviewed_signal_id = str(signal_id or "").strip()
+    if expected_side not in {"LONG", "SHORT"}:
+        groq = {
+            "provider": "Groq", "model": "openai/gpt-oss-20b",
+            "status": "SKIPPED", "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
+            "request_attempted": False, "response_source": "NONE",
+            "response_validated": False, "model_verified": False,
+            "paper_entry_eligible": False, "reviewed_signal_id": reviewed_signal_id,
+            "reviewed_at_utc": reviewed_at, "observation_only": demo_advisory_mode,
+            "execution_effect": "NO_TRADE_NO_AI_REQUEST",
+            "groq_approval_positive": False, "groq_vetoed": False,
+            "technical_approved": False, "demo_advisory_mode": demo_advisory_mode,
+        }
+        consensus = {
+            "status": "NO_TRADE", "decision": "NO_TRADE_NO_AI_REQUEST",
+            "entry_gate_enforced": not demo_advisory_mode,
+            "reviewer_status": "SKIPPED", "reviewer_approved": False,
+            "reviewed_signal_id": reviewed_signal_id, "reviewed_at_utc": reviewed_at,
+            "groq_approval_positive": False, "groq_vetoed": False,
+            "technical_approved": False, "demo_advisory_mode": demo_advisory_mode,
+            "groq_approved": False, "verified_approval_count": 0,
+            "single_groq_reviewer_approval": False, "single_reviewer_approval": False,
+            "two_reviewer_approval": False, "elliott_is_advisory": easy_demo_entry,
+        }
+        return {
+            "approved": False, "advisory_only": demo_advisory_mode,
+            "status": "NO_TRADE", "ai_status": "NO_TRADE",
+            "ai_review": groq, "second_ai_review": None,
+            "ai_reviews": [{"reviewer_id": "groq", "review": groq}],
+            "ai_consensus": consensus, "elliott_evidence_snapshot": {},
+            "reason_fa": "سیگنال جهت‌دار وجود ندارد؛ درخواست Groq ارسال نشد.",
+        }
+
     try:
         reviewer = second_reviewer or _ai.run_independent_ai_supervisor
         groq = reviewer(analysis, asset, review_role=_groq_historical_review_role(asset))
@@ -398,6 +432,22 @@ def run_challenge1_v2_supervisor_reviews(
     except Exception as exc:
         groq = {"status": "ERROR", "error_type": type(exc).__name__}
     groq = dict(groq)
+
+    # Normalize echoes for comparison, filling only missing wave labels from
+    # the exact signal-bound quantitative evidence. Explicit mismatches remain mismatches.
+    groq["expected_side"] = str(groq.get("expected_side") or expected_side).strip().upper()
+    groq["trader_proposal"] = str(groq.get("trader_proposal") or "").strip().upper()
+    raw_phase = groq.get("elliott_wave_phase")
+    raw_direction = groq.get("elliott_wave_direction")
+    groq["elliott_wave_phase"] = (
+        _ai._normalize_v2_phase(raw_phase) if str(raw_phase or "").strip()
+        else expected_wave_phase
+    )
+    groq["elliott_wave_direction"] = (
+        _ai._normalize_v2_direction(raw_direction) if str(raw_direction or "").strip()
+        else expected_wave_direction
+    )
+
     provider = str(groq.get("provider") or "").strip().casefold()
     model = str(groq.get("model") or "").strip()
     returned_model = str(groq.get("returned_model") or "").strip()
@@ -405,7 +455,10 @@ def run_challenge1_v2_supervisor_reviews(
     returned_identity = normalize_groq_model_id(returned_model)
     allowed_models = {normalize_groq_model_id(item) for item in GROQ_ALLOWED_MODELS}
     provider_is_groq = "groq" in provider
-    model_is_groq_allowlisted = model_identity in allowed_models and returned_identity == model_identity
+    model_is_groq_allowlisted = (
+        bool(model_identity) and model_identity in allowed_models
+        and returned_identity == model_identity
+    )
     verified = (
         groq.get("request_attempted") is True
         and str(groq.get("response_source") or "").strip().upper() == "LIVE_API"
@@ -413,45 +466,38 @@ def run_challenge1_v2_supervisor_reviews(
         and groq.get("model_verified") is True
     )
     wave_match = (
-        _ai._normalize_v2_phase(groq.get("elliott_wave_phase")) == expected_wave_phase
-        and _ai._normalize_v2_direction(groq.get("elliott_wave_direction")) == expected_wave_direction
+        groq["elliott_wave_phase"] == expected_wave_phase
+        and groq["elliott_wave_direction"] == expected_wave_direction
     )
     side_match = (
-        str(groq.get("expected_side") or "").strip().upper() == expected_side
-        and str(groq.get("trader_proposal") or "").strip().upper() == expected_side
+        groq["expected_side"] == expected_side
+        and groq["trader_proposal"] == expected_side
     )
     groq_approval_positive = bool(
-        provider_is_groq
-        and model_is_groq_allowlisted
-        and verified
-        and wave_match
-        and side_match
-        and _demo_ai_review_approved(groq)
+        provider_is_groq and model_is_groq_allowlisted and verified
+        and wave_match and side_match and _demo_ai_review_approved(groq)
     )
     groq_vetoed = not groq_approval_positive
-
-    if demo_advisory_mode:
-        approved = technical_approved
-    else:
-        approved = technical_approved and groq_approval_positive
-
-    reviewer_status = str(groq.get("status") or "UNKNOWN").strip().upper()
-    if reviewer_status in {"VETO", "REJECT"} and not demo_advisory_mode:
-        approved = False
+    approved = technical_approved if demo_advisory_mode else (
+        technical_approved and groq_approval_positive
+    )
+    raw_reviewer_status = str(groq.get("status") or "UNKNOWN").strip().upper()
     if demo_advisory_mode and approved:
         reviewer_status = (
             "APPROVED_WITH_GROQ_ADVISORY"
             if not groq_vetoed else "APPROVED_WITH_GROQ_ADVISORY_VETO"
         )
     elif approved:
-        reviewer_status = "APPROVED"
-    elif not groq_approval_positive:
-        reviewer_status = "VETO" if reviewer_status in {"VETO", "REJECT"} else "NOT_APPROVED"
+        reviewer_status = "APPROVED_BY_GROQ"
+    elif raw_reviewer_status in {"VETO", "REJECT", "REJECTED"}:
+        reviewer_status = "VETO"
+    else:
+        reviewer_status = "UNKNOWN"
 
     groq.update({
         "observation_only": demo_advisory_mode,
         "execution_effect": "ADVISORY_ONLY" if demo_advisory_mode else "ENTRY_APPROVAL_GATE",
-        "reviewed_signal_id": str(signal_id or ""),
+        "reviewed_signal_id": reviewed_signal_id,
         "reviewed_at_utc": reviewed_at,
         "provider_is_groq": provider_is_groq,
         "model_is_groq_allowlisted": model_is_groq_allowlisted,
@@ -464,15 +510,24 @@ def run_challenge1_v2_supervisor_reviews(
         "demo_advisory_mode": demo_advisory_mode,
     })
     consensus = {
-        "status": reviewer_status if approved else ("VETO" if reviewer_status == "VETO" else "REJECTED"),
-        "decision": "AUTHORIZE_DEMO_EXECUTION" if approved else "BLOCK_DEMO_ENTRY",
+        "status": reviewer_status,
+        "decision": (
+            "AUTHORIZE_DEMO_EXECUTION_WITH_GROQ_ADVISORY"
+            if demo_advisory_mode and approved else
+            "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER"
+            if approved else "BLOCK_DEMO_ENTRY"
+        ),
         "entry_gate_enforced": not demo_advisory_mode,
         "reviewer_status": reviewer_status,
+        "reviewer_id": "groq",
+        "reviewer_verified": verified,
+        "provider_is_groq": provider_is_groq,
+        "model_is_groq_allowlisted": model_is_groq_allowlisted,
         "reviewer_approved": approved,
         "expected_side": expected_side,
         "elliott_wave_phase": expected_wave_phase,
         "elliott_wave_direction": expected_wave_direction,
-        "reviewed_signal_id": str(signal_id or ""),
+        "reviewed_signal_id": reviewed_signal_id,
         "reviewed_at_utc": reviewed_at,
         "groq_approval_positive": groq_approval_positive,
         "groq_vetoed": groq_vetoed,
@@ -481,6 +536,9 @@ def run_challenge1_v2_supervisor_reviews(
         "groq_approved": groq_approval_positive,
         "verified_approval_count": int(groq_approval_positive),
         "single_groq_reviewer_approval": groq_approval_positive,
+        "single_reviewer_approval": groq_approval_positive,
+        "two_reviewer_approval": False,
+        "elliott_is_advisory": easy_demo_entry,
     }
     return {
         "approved": approved,
@@ -496,7 +554,7 @@ def run_challenge1_v2_supervisor_reviews(
             "تأیید فنی مستقل از Groq؛ رأی Groq فقط برای سنجش کیفیت ثبت شد."
             if demo_advisory_mode and approved else
             "تأیید Groq و کنترل فنی برای ورود لازم است."
-            if approved else "شرایط تأیید فنی یا تأیید معتبر Groq برقرار نیست."
+            if approved else "تأیید معتبر فنی و Groq دریافت نشد؛ ورود مسدود است."
         ),
     }
 

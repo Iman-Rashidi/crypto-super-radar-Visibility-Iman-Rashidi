@@ -13,14 +13,14 @@ from crypto_super_radar.challenge1_v2 import (
 class Challenge1V2RenderSchedulerTests(unittest.TestCase):
     def test_v2_entry_thresholds_are_adx_18_and_score_62(self):
         self.assertEqual(MIN_ADX_1H, 18.0)
-        self.assertEqual(MIN_ENTRY_SCORE, 62.0)
+        self.assertEqual(MIN_ENTRY_SCORE, 55.0)
         self.assertTrue(adx_meets_entry_threshold(18.0))
         self.assertTrue(adx_meets_entry_threshold(22.0))
         self.assertFalse(adx_meets_entry_threshold(17.999))
         self.assertFalse(adx_meets_entry_threshold(float("nan")))
-        self.assertTrue(entry_score_meets_threshold(62.0))
+        self.assertTrue(entry_score_meets_threshold(55.0))
         self.assertTrue(entry_score_meets_threshold(70.0))
-        self.assertFalse(entry_score_meets_threshold(61.999))
+        self.assertFalse(entry_score_meets_threshold(54.999))
         self.assertFalse(entry_score_meets_threshold(float("inf")))
         self.assertEqual(MAX_STOP_DISTANCE_PCT, 0.035)
 

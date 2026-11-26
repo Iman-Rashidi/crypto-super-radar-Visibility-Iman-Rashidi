@@ -91,7 +91,7 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
         with (
             patch.object(challenge1_v2, "_regime", return_value=regime),
             patch.object(challenge1_v2, "atr", return_value=atr_values),
-            patch.object(challenge1_v2, "ema", side_effect=lambda series, period: pd.Series(102.0 if period == 21 else 103.0, index=series.index)),
+            patch.object(challenge1_v2, "ema", side_effect=lambda series, period: pd.Series([99.0 + i * 0.001 for i in range(len(series))] if period == 21 else 103.0, index=series.index)),
             patch.object(challenge1_v2, "rsi", return_value=pd.Series(50.0, index=m15.index)),
             patch.object(challenge1_v2, "_elliott_wave_1h_evidence", return_value=wave),
         ):
