@@ -8,7 +8,8 @@ from crypto_super_radar.gem_hunter_watchlist import (
     ensure_watchlist_schema, record_watchlist_candidates, refresh_watchlist_prices,
     watchlist_snapshot, is_watchlist_eligible, send_watchlist_profit_alerts,
 )
-from crypto_super_radar.telegram_notifier import TARGET_CHAT_ID\nfrom crypto_super_radar.gem_hunter_qualification import normalize_pump_phase
+from crypto_super_radar.telegram_notifier import TARGET_CHAT_ID
+from crypto_super_radar.gem_hunter_qualification import normalize_pump_phase
 
 class WatchlistLedgerTests(unittest.TestCase):
     def setUp(self):
