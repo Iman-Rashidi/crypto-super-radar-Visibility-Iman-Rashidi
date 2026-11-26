@@ -582,7 +582,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
     if trading_active and executor is None:
         raise RuntimeError("Demo trading flags enabled without BloFinDemoExecutor.")
     cycle_id,started_at=uuid.uuid4().hex,_utc_now()
-    if notifier is None and str(env.get("TELEGRAM_BOT_TOKEN") or "").strip():
+    if notifier is None and str(env.get("TELEGRAM_BOT_TOKEN") or env.get("CSR_TELEGRAM_BOT_TOKEN") or "").strip():
         try:
             from .telegram_notifier import TelegramNotifier
             from .database import connect_database
