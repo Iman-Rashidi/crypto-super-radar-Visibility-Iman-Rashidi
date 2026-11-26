@@ -17,17 +17,27 @@ ALLOWED_HOSTS = {"blofin.com", "www.blofin.com", "v3.blofin.com"}
 
 
 def fetch_text(url: str) -> str:
-    response = requests.get(
-        url,
-        headers={"User-Agent": "CRYPTO-SUPER-RADAR-DemoChallengeHunter/1.0"},
-        timeout=(5, 20),
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-    if urlparse(response.url).hostname not in ALLOWED_HOSTS:
-        raise ValueError("BloFin page redirected outside the official BloFin domains.")
-    return response.text
-
+    current_url = url
+    for _ in range(4):
+        parsed = urlparse(current_url)
+        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+            raise ValueError("Only official HTTPS BloFin domains are allowed.")
+        response = requests.get(
+            current_url,
+            headers={"User-Agent": "CRYPTO-SUPER-RADAR-DemoChallengeHunter/1.0"},
+            timeout=(5, 20),
+            allow_redirects=False,
+        )
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("Location")
+            if not location:
+                raise ValueError("BloFin returned a redirect without a Location header.")
+            from urllib.parse import urljoin
+            current_url = urljoin(current_url, location)
+            continue
+        response.raise_for_status()
+        return response.text
+    raise ValueError("Too many redirects while fetching official BloFin pages.")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
