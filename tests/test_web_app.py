@@ -682,6 +682,7 @@ class WebAppHttpTests(unittest.TestCase):
             web_app.V2_PUBLIC_SNAPSHOT_CACHE.update({"expires_at": 0.0, "payload": None})
         with (
             patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+            patch.object(web_app, "V2_PUBLIC_SNAPSHOT_CACHE_TTL_SECONDS", 30),
             patch.object(web_app, "connect_database", return_value=connection) as connect,
         ):
             snapshot = web_app._blofin_v2_public_cycle_snapshot()
