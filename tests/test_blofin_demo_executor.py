@@ -1659,8 +1659,12 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             position_confirmed_closed=True,
         )
         self.assertEqual(accepted["status"], "RECORDED")
-        self.assertEqual(accepted["evidence"]["quantity_tolerance"], "0.500")
-        self.assertTrue(accepted["evidence"]["position_confirmed_closed"])
+        accepted_experience = self.store.learning_memory.get_experience(
+            self.store.get_order(plan["client_order_id"])["experience_id"]
+        )
+        accepted_evidence = accepted_experience["events"][-1]["payload"]["evidence"]
+        self.assertEqual(accepted_evidence["quantity_tolerance"], "0.500")
+        self.assertTrue(accepted_evidence["position_confirmed_closed"])
 
         plan, history = create_order("rounding-fail", "rounding-fail")
         history["closePositions"] = "99.4"
