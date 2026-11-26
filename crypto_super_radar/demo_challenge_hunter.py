@@ -113,7 +113,7 @@ def classify_campaign(
     has_reward = _contains_any(evidence, _REWARD_TERMS)
 
     if has_demo and has_live:
-        demo_only = "NO_LIVE_REQUIREMENTS"
+        demo_only = "LIVE_REQUIREMENTS_FOUND"
         note = "Demo task exists, but the campaign also mentions deposit/live-trading requirements."
     elif has_demo:
         demo_only = "POTENTIALLY_DEMO_ONLY"
