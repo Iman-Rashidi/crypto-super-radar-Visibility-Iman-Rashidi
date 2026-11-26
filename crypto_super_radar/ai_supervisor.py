@@ -332,8 +332,8 @@ def _groq_historical_review_role(asset: Any, experiences: list[dict[str, Any]] |
         return "SOLE AI SUPERVISOR"
     # Parse the helper's fixed schema and re-emit a compact, bounded vocabulary.
     import re
-    sample = re.search(r"VERIFIED_FINAL_SAMPLES=(\\d+)", context)
-    win = re.search(r"WIN_RATE_PCT=(\\d+(?:\\.\\d+)?)", context)
+    sample = re.search(r"VERIFIED_FINAL_SAMPLES=(\d+)", context)
+    win = re.search(r"WIN_RATE_PCT=(\d+(?:\\.\d+)?)", context)
     diagnosis = re.search(r"TOP_DIAGNOSIS=([A-Z_]+)", context)
     allowed_codes = {
         "TRAILING_STOP_MISSING", "LATE_WAVE_ENTRY", "TIGHT_STOP_WHIPSAW",
