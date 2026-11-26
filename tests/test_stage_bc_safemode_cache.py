@@ -153,6 +153,16 @@ class DemoDashboardCacheTests(unittest.TestCase):
         self.assertTrue(result["cycle_lag_warning"])
         self.assertEqual(result["cycle_lag_status"], "NO_SUCCESSFUL_CYCLE")
 
+    def test_dashboard_renders_blofin_cycle_lag_alert_slot(self):
+        from pathlib import Path
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "crypto_super_radar" / "web_app.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('id="blofin-v2-cycle-lag"', source)
+        self.assertIn("cycle_lag_warning", source)
+        self.assertIn("blofinCycleLag.hidden", source)
+
 
 if __name__ == "__main__":
     unittest.main()
