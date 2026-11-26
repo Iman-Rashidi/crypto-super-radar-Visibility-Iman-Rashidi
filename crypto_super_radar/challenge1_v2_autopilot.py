@@ -26,6 +26,119 @@ def _enabled(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
+
+def _four_hour_bucket(now: datetime | None = None) -> str:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    bucket_hour = (current.hour // 4) * 4
+    return current.replace(hour=bucket_hour, minute=0, second=0, microsecond=0).strftime("%Y%m%dT%H")
+
+
+def _summary_rows(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        value = value.get("data", value)
+        if isinstance(value, Mapping):
+            value = [value]
+    return [item for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
+
+
+def send_four_hour_telegram_summary(
+    client: Any, connection: Any, *, cycle: Mapping[str, Any], notifier: Any,
+) -> str:
+    """Send one Turso-idempotent Persian operational summary per four-hour UTC bucket."""
+    if notifier is None or not callable(getattr(notifier, "send_once", None)):
+        return "NOT_CONFIGURED"
+    bucket = _four_hour_bucket()
+    event_key = f"challenge1-v2-summary:{bucket}"
+    open_positions: list[Mapping[str, Any]] = []
+    positions_error = None
+    try:
+        open_positions = [
+            row for row in _summary_rows(client.get_positions())
+            if abs(float(row.get("pos") or row.get("positionSize") or row.get("availPos") or 0)) > 0
+        ]
+    except Exception as exc:
+        positions_error = type(exc).__name__
+
+    def _num(value: Any) -> float:
+        try:
+            number = float(value)
+            return number if number == number and abs(number) != float("inf") else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    floating = sum(_num(row.get("upl", row.get("unrealizedPnl", row.get("unrealized_pnl"))))
+                   for row in open_positions)
+    closed_count, realized_net = 0, 0.0
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM blofin_demo_orders WHERE status='CLOSED'"
+        ).fetchone()
+        closed_count = int(row[0] or 0) if row else 0
+        events = connection.execute(
+            "SELECT payload_json FROM blofin_demo_execution_events "
+            "WHERE event_type='OUTCOME_RECORDED' ORDER BY occurred_at DESC LIMIT 500"
+        ).fetchall()
+        seen = set()
+        for event in events:
+            raw = event[0] if not isinstance(event, Mapping) else event.get("payload_json")
+            payload = json.loads(raw or "{}")
+            position_id = str(payload.get("position_id") or "")
+            if position_id and position_id not in seen:
+                seen.add(position_id)
+                realized_net += _num(payload.get("realized_pnl_after_reported_trading_fees"))
+    except Exception:
+        # A missing legacy table is reported as unavailable, never represented as zero PnL.
+        closed_count, realized_net = -1, 0.0
+
+    market_lines = []
+    for symbol in SYMBOLS:
+        item = next((row for row in cycle.get("symbols", []) if row.get("symbol") == symbol), {})
+        direction = str(item.get("signal") or "نامشخص")
+        status = str(item.get("status") or "UNKNOWN")
+        reason = str(item.get("entry_skipped_reason") or item.get("reason_fa") or item.get("reason") or "")
+        market_lines.append(f"• {symbol}: {direction} | {status}" + (f" | {reason[:100]}" if reason else ""))
+
+    gem_status, gem_summary = "نامشخص", "داده Gem Hunter در دسترس نیست"
+    try:
+        row = connection.execute(
+            "SELECT payload_json FROM gem_hunter_scan_reports ORDER BY generated_at_utc DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            raw = row[0] if not isinstance(row, Mapping) else row.get("payload_json")
+            gem = json.loads(raw or "{}")
+            gem_status = str(gem.get("status") or "UNKNOWN")
+            gem_summary = (
+                f"فعال/کشف‌شده: {gem.get('discovered_candidate_count', 0)} | "
+                f"Tier 1: {gem.get('gem_hunter_v3_tier1_count', 0)} | "
+                f"Tier 2: {gem.get('gem_hunter_v3_tier2_count', 0)}"
+            )
+    except Exception:
+        pass
+
+    closed_text = "داده دفترکل در دسترس نیست" if closed_count < 0 else f"{closed_count}/50 | خالص ثبت‌شده پس از کارمزد: {realized_net:.4f} USDT"
+    position_text = (
+        f"{len(open_positions)} | PnL شناور: {floating:.4f} USDT"
+        if positions_error is None else f"نامشخص ({positions_error})"
+    )
+    message = (
+        f"📊 گزارش چهار‌ساعته CRYPTO SUPER RADAR\n"
+        f"بازه UTC: {bucket}:00\n"
+        f"پوزیشن‌های باز BloFin Demo: {position_text}\n"
+        f"معاملات بسته‌شده از هدف ۵۰: {closed_text}\n"
+        f"چرخه اخیر: {cycle.get('status')} | سفارش ارسال‌شده: {'بله' if cycle.get('orders_submitted') else 'خیر'}\n"
+        f"بازارهای اصلی:\n" + "\n".join(market_lines) +
+        f"\nGem Hunter ({gem_status}): {gem_summary}\n"
+        f"توجه: PnL تحقق‌یافته گزارش‌شده، Funding را شامل نمی‌شود مگر آنکه جداگانه تطبیق شده باشد."
+    )
+    try:
+        result = notifier.send_once(event_key, message)
+        return str(result.get("status") or "UNKNOWN")
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "FOUR_HOUR_TELEGRAM_SUMMARY_FAILED error_type=%s", type(exc).__name__
+        )
+        return "FAILED"
+
 def preflight_errors(environ: Mapping[str, str] | None = None) -> list[str]:
     env = os.environ if environ is None else environ
     errors = []
@@ -507,7 +620,14 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
     connection.commit()
     blocked=sum(row.get("status")=="DATA_BLOCKED" for row in rows)
     submitted=any(bool(row.get("orders_submitted")) for row in rows)
+    cycle_payload = {"cycle_id":cycle_id,"status":"CYCLE_COMPLETED" if not blocked else "CYCLE_PARTIAL",
+        "mode":"DEMO_AUTOPILOT" if trading_active else "DRY_RUN","environment":"BLOFIN_DEMO",
+        "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted}
+    telegram_report_status = send_four_hour_telegram_summary(
+        client, connection, cycle=cycle_payload, notifier=notifier
+    )
     return {"cycle_id":cycle_id,"status":"CYCLE_COMPLETED" if not blocked else "CYCLE_PARTIAL",
+        "telegram_report_status":telegram_report_status,
         "mode":"DEMO_AUTOPILOT" if trading_active else "DRY_RUN","environment":"BLOFIN_DEMO",
         "symbols":rows,"orders_submitted":submitted,"trade_executed":submitted,
         "open_position_limit":4,"position_limit_enforced":trading_active,
