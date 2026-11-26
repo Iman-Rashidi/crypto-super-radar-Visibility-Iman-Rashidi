@@ -1,0 +1,56 @@
+name: Dump BloFin Demo Position History Once
+
+on:
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - .github/workflows/dump-position-history-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dump-position-history-once
+  cancel-in-progress: false
+
+jobs:
+  dump-position-history:
+    name: Read-only position history export
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BLOFIN_DEMO_API_KEY: ${{ secrets.BLOFIN_DEMO_API_KEY }}
+      BLOFIN_DEMO_API_SECRET: ${{ secrets.BLOFIN_DEMO_API_SECRET }}
+      BLOFIN_DEMO_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_PASSPHRASE }}
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          ref: staging/challenge1-integration-2026-11-16
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install read-only script dependency
+        run: python -m pip install --disable-pip-version-check requests
+
+      - name: Collect selected BloFin Demo position history
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/dump_position_history.py \
+            --map 1000000995117=BTC-USDT \
+            --map 1000000995119=ETH-USDT \
+            --map 1000000995121=SOL-USDT | tee position-history.json
+
+      - name: Upload JSON result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blofin-demo-position-history
+          path: position-history.json
+          if-no-files-found: ignore
+          retention-days: 7
