@@ -8182,7 +8182,7 @@ class Handler(BaseHTTPRequestHandler):
         </header>
         <section class="card" id="csr-ai-copilot" aria-labelledby="csr-ai-copilot-title">
           <h2 id="csr-ai-copilot-title">🤖 دستیار هوشمند بازار و رادار (CSR AI Chat)</h2>
-          <p class="muted">پاسخ فارسی بر پایهٔ آخرین داده‌های داشبورد، فقط با فشردن دکمه ارسال. فقط‌خواندنی؛ بدون سفارش، معامله یا تغییر تنظیمات. سقف ۲۰ پیام در ساعت برای هر IP و حداکثر ۲۰۰۰ نویسه در هر پیام.</p>
+          <p class="muted">پاسخ فارسی بر پایهٔ آخرین داده‌های داشبورد، فقط با فشردن دکمه ارسال. فقط‌خواندنی؛ بدون سفارش، معامله یا تغییر تنظیمات. بدون سهمیهٔ API و بدون سقف ساعتی پیام؛ موتور پاسخ‌گویی داخلی و فقط‌خواندنی است. برای حفاظت از منابع سرور، حداکثر طول هر پیام ۸۰۰۰ نویسه است.</p>
           <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px">
             <button type="button" data-copilot-question="خلاصه وضعیت پنج ارز CHALLENGE_1_V2 الان چیست؟">خلاصه وضعیت ۵ ارز V2</button>
             <button type="button" data-copilot-question="چرا ربات در چرخه اخیر وارد معامله نشد؟">چرا چرخه اخیر وارد نشد؟</button>
@@ -8193,7 +8193,7 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <form id="csr-copilot-form">
             <label for="csr-copilot-input">پیام شما</label>
-            <textarea id="csr-copilot-input" maxlength="2000" rows="3" placeholder="سؤال خود را به فارسی بنویسید..." style="width:100%;margin:8px 0;padding:12px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text)"></textarea>
+            <textarea id="csr-copilot-input" maxlength="8000" rows="3" placeholder="سؤال خود را به فارسی بنویسید..." style="width:100%;margin:8px 0;padding:12px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text)"></textarea>
             <div class="grid" style="grid-template-columns:minmax(0,1fr) auto;align-items:center">
               <span id="csr-copilot-status" class="muted" aria-live="polite">اتصال فقط هنگام ارسال پیام برقرار می‌شود.</span>
               <button id="csr-copilot-send" type="submit" style="width:auto;min-width:112px">ارسال پیام</button>
@@ -8216,14 +8216,14 @@ class Handler(BaseHTTPRequestHandler):
           }
           async function submitMessage(message){
             const text=String(message||'').trim();if(!text)return;
-            if(text.length>2000){status.textContent='حداکثر طول پیام ۲۰۰۰ نویسه است.';return;}
+            if(text.length>8000){status.textContent='حداکثر طول پیام ۸۰۰۰ نویسه است.';return;}
             addLine('شما:',text);input.value='';send.disabled=true;status.textContent='در حال دریافت پاسخ...';
             try{
               const response=await fetch('/api/ai-copilot/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
               const data=await response.json();if(!response.ok)throw new Error(data.code||"درخواست ناموفق بود");
               addLine('دستیار:',data.answer||'پاسخ خالی از مدل دریافت شد.');
-              status.textContent='مدل: '+data.provider+' · فقط‌خواندنی · سقف ۲۰ پیام در ساعت';
-            }catch(error){addLine("خطا:",String(error.message||error));status.textContent="پاسخ دریافت نشد؛ برای جلوگیری از مصرف سهمیه، فقط در صورت نیاز دوباره ارسال کنید.";}
+              status.textContent='موتور: '+data.model+' · بدون سهمیه API · فقط‌خواندنی';
+            }catch(error){addLine("خطا:",String(error.message||error));status.textContent="پاسخ دریافت نشد؛ خطای داخلی را بررسی کنید و دوباره تلاش کنید.";}
             finally{send.disabled=false;}
           }
           form.addEventListener("submit",event=>{event.preventDefault();submitMessage(input.value);});
@@ -11477,7 +11477,7 @@ async function loadBlofinInstruments(){
                 length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
                 return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
-            if length <= 0 or length > 8192:
+            if length <= 0 or length > 32768:
                 return self._send(413, b'{"status":"INVALID_PAYLOAD_SIZE"}', "application/json; charset=utf-8")
             try:
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
