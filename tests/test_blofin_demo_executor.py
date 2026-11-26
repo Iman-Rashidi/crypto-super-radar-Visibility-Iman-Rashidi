@@ -92,7 +92,7 @@ def signal_record(**overrides):
             "volume": 1100.0,
         },
     ]
-    signal_id = f"challenge1-v4:BTC-USDT:5m:{signal_bar}"
+    signal_id = f"challenge1-v4:{record['inst_id']}:5m:{signal_bar}"
     record["signal_id"] = signal_id
     record["signal_bar_open_utc"] = signal_bar
     record["execution"] = {"status": "PASS", "direction": side, "signal_id": signal_id}
@@ -1474,7 +1474,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(outcome["decision_correctness"], "UNKNOWN")
         self.assertIsNone(outcome["realized_net_pnl"])
 
-    def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
+    def test_closed_position_outcome_uses_exact_position_id_and_realized_pnl_without_double_fee(self):
         challenge = signal_record()
         experience_id = self.store.record_challenge1_decision(
             instrument_id="BTC-USDT",
@@ -1526,18 +1526,6 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "realizedPnl": "1.0",
             "fee": "0.1",
         }]
-        missing_fee_history = [dict(closed[0])]
-        missing_fee_history[0].pop("fee", None)
-        missing_fee = self.store.record_closed_position_outcome(
-            instrument_id="BTC-USDT",
-            history_rows=missing_fee_history,
-            partial_rows=partial,
-            client_order_id=plan["client_order_id"],
-            position_id="demo-position-77",
-        )
-        self.assertEqual(missing_fee["status"], "WAITING_FOR_EXCHANGE_FEE_DATA")
-        self.assertEqual(self.store.pending_learning_outcome_count(), 1)
-
         saved = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT",
             history_rows=closed,
@@ -1550,11 +1538,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
         outcome = experience["events"][-1]["payload"]
         self.assertEqual(outcome["realized_result"], "PROFIT")
-        self.assertAlmostEqual(outcome["realized_net_pnl"], 1.3)
-        self.assertFalse(outcome["evidence"]["funding_fees_included"])
+        self.assertAlmostEqual(outcome["realized_net_pnl"], 1.5)
+        self.assertTrue(outcome["evidence"]["funding_fees_included"])
         self.assertAlmostEqual(
-            outcome["evidence"]["realized_pnl_after_reported_trading_fees"],
-            1.3,
+            float(outcome["evidence"]["realized_pnl_after_reported_trading_fees"]),
+            1.5,
         )
         self.assertEqual(self.store.orders_pending_learning_outcome(), [])
 
@@ -1611,7 +1599,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(recorded["status"], "RECORDED")
         self.assertEqual(self.store.pending_learning_outcome_count(), 0)
         self.assertEqual(recorded["realized_result"], "PROFIT")
-        self.assertAlmostEqual(recorded["realized_pnl_after_reported_trading_fees"], 2.40)
+        self.assertAlmostEqual(float(recorded["realized_pnl_after_reported_trading_fees"]), 2.50)
 
         experience = self.store.learning_memory.get_experience(experience_id)
         self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
@@ -1622,7 +1610,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         outcome = experience["events"][-1]["payload"]
         self.assertEqual(outcome["decision_correctness"], "UNKNOWN")
         self.assertEqual(outcome["evidence"]["position_id"], "demo-position-77")
-        self.assertFalse(outcome["evidence"]["funding_fees_included"])
+        self.assertTrue(outcome["evidence"]["funding_fees_included"])
         self.assertEqual(experience["verification"]["status"], "PASS")
 
         duplicate = self.store.record_closed_position_outcome(
@@ -1638,6 +1626,84 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
                 (experience_id,),
             ).fetchone()[0],
             2,
+        )
+
+
+    def test_blofin_artifact_three_positions_without_side_exact_net_pnl(self):
+        fixtures = [
+            ("BTC-USDT", "1000000995117", "0.0829", "60264.7", "60629.1", "25.445180074204390167", "-4.002796656"),
+            ("ETH-USDT", "1000000995119", "2.962", "1688.6", "1699.18", "24.750250412466287336", "-6.020762616"),
+            ("SOL-USDT", "1000000995121", "70.67", "70.76", "70.73", "-8.081731340987836122", "-5.99945898"),
+        ]
+        total = Decimal("0")
+        for index, (inst, pid, qty, entry, close, pnl, fee) in enumerate(fixtures):
+            challenge = signal_record(
+                inst_id=inst, instrument_id=inst,
+                signal_id="artifact-fixture-{}-{}".format(index, pid),
+            )
+            experience_id = self.store.record_challenge1_decision(
+                instrument_id=inst, challenge_record=challenge,
+            )
+            plan = build_demo_order_plan(
+                challenge, instrument_record(instId=inst), inst_id=inst, equity_usdt=1000,
+            )
+            plan["experience_id"] = experience_id
+            self.assertTrue(self.store.reserve_order(plan))
+            self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="artifact-order-{}".format(index))
+            self.assertTrue(self.store.attach_position_id(experience_id, pid))
+            self.store._db.execute(
+                "UPDATE blofin_demo_orders SET entry_price=?, quantity=? WHERE client_order_id=?",
+                (entry, qty, plan["client_order_id"]),
+            )
+            opened_ms = int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000 + 5000
+            history = {
+                "positionId": pid, "instId": inst, "positionSide": "net",
+                "createTime": str(opened_ms), "openAveragePrice": entry,
+                "closeAveragePrice": close, "closePositions": qty, "maxPositions": qty,
+                "realizedPnl": pnl, "fee": fee,
+            }
+            result = self.store.record_closed_position_outcome(
+                instrument_id=inst, history_rows=[history],
+                client_order_id=plan["client_order_id"], position_id=pid,
+            )
+            self.assertEqual(result["status"], "RECORDED")
+            self.assertEqual(Decimal(result["net_pnl"]), Decimal(pnl))
+            self.assertEqual(self.store.get_order(plan["client_order_id"])["status"], "CLOSED")
+            total += Decimal(result["net_pnl"])
+        self.assertEqual(total, Decimal("42.113699145682841381"))
+
+    def test_reconcile_stuck_after_six_confirmed_closed_cycles_is_durable_and_keeps_slot(self):
+        challenge = signal_record(signal_id="reconcile-stuck-test")
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT", challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["signal_id"] = "reconcile-stuck-test"
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="stuck-order")
+        self.assertTrue(self.store.attach_position_id(experience_id, "stuck-position"))
+        for _ in range(6):
+            result = self.store.record_closed_position_outcome(
+                instrument_id="BTC-USDT", history_rows=[], partial_rows=[],
+                client_order_id=plan["client_order_id"], position_id="stuck-position",
+                position_confirmed_closed=True,
+            )
+        self.assertEqual(result["status"], "RECONCILE_STUCK")
+        self.assertEqual(result["reconcile_attempts"], 6)
+        self.assertEqual(
+            self.store._db.execute(
+                "SELECT status FROM blofin_demo_orders WHERE client_order_id=?",
+                (plan["client_order_id"],),
+            ).fetchone()[0],
+            "RECONCILE_STUCK",
+        )
+        self.assertEqual(
+            self.store._db.execute(
+                "SELECT attempts FROM blofin_demo_reconcile_attempts WHERE client_order_id=?",
+                (plan["client_order_id"],),
+            ).fetchone()[0],
+            6,
         )
 
     def test_outcome_waits_until_the_exchange_position_id_is_linked(self):
