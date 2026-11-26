@@ -587,7 +587,8 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             from .telegram_notifier import TelegramNotifier
             from .database import connect_database
             notifier = TelegramNotifier(
-                token=str(env.get("TELEGRAM_BOT_TOKEN") or ""),
+                token=str(env.get("TELEGRAM_BOT_TOKEN") or env.get("CSR_TELEGRAM_BOT_TOKEN") or ""),
+                chat_id=env.get("TELEGRAM_CHAT_ID") or env.get("CSR_TELEGRAM_CHAT_ID") or None,
                 connection_factory=connect_database,
             )
             try:
