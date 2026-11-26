@@ -83,6 +83,45 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_blofin_demo_challenge_panel_and_readiness_endpoint_are_read_only(self):
+        status, _, payload = self.request("GET", "/api/blofin/demo-challenges")
+        self.assertEqual(status, 200)
+        data = json.loads(payload)
+        self.assertEqual(data["mode"], "READ_ONLY_PUBLIC_DATA")
+        self.assertFalse(data["orders_submitted"])
+        self.assertFalse(data["registration_submitted"])
+        page_status, _, page = self.request("GET", "/")
+        self.assertEqual(page_status, 200)
+        rendered = page.decode("utf-8")
+        self.assertIn("شکارچی مسابقات رایگان BloFin Demo", rendered)
+        self.assertIn("/api/blofin/demo-challenges/scan", rendered)
+
+    def test_blofin_demo_challenge_scan_requires_same_origin(self):
+        status, _, payload = self.request(
+            "POST", "/api/blofin/demo-challenges/scan", "{}",
+            {"Content-Type":"application/json"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(payload)["code"], "SAME_ORIGIN_REQUIRED")
+
+    def test_blofin_demo_challenge_scan_is_read_only_and_returns_scanner_report(self):
+        report = {
+            "schema_version":"1.0", "mode":"READ_ONLY_PUBLIC_DATA",
+            "orders_submitted":False, "registration_submitted":False,
+            "results":[], "errors":[], "scanned_at_utc":"2026-11-26T00:00:00+00:00",
+        }
+        with patch.object(web_app, "scan_blofin_demo_challenges", return_value=report) as scanner:
+            status, _, payload = self.request(
+                "POST", "/api/blofin/demo-challenges/scan", "{}",
+                {"Content-Type":"application/json", "Origin":f"http://{self.host}:{self.port}"},
+            )
+        self.assertEqual(status, 200)
+        data = json.loads(payload)
+        self.assertEqual(data["mode"], "READ_ONLY_PUBLIC_DATA")
+        self.assertFalse(data["orders_submitted"])
+        self.assertFalse(data["registration_submitted"])
+        scanner.assert_called_once()
+
     def test_disabled_autopilot_startup_clears_stale_next_cycle_metadata(self):
         previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
         try:

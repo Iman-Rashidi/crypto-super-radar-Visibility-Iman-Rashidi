@@ -19,10 +19,13 @@ from types import SimpleNamespace
 from typing import Mapping
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urljoin
+
+import requests
 
 import pandas as pd
 
+from .demo_challenge_hunter import ACTIVITY_URL as BLOFIN_ACTIVITY_URL, scan_blofin_demo_challenges
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
 from .dashboard_data import market_movement_label
@@ -2078,6 +2081,65 @@ def _learning_lessons_panel_html() -> str:
     </script>"""
 
 
+def _blofin_demo_challenge_panel_html() -> str:
+    """Render the read-only BloFin public Demo challenge discovery panel."""
+    return """<section class="card" id="blofin-demo-challenges">
+      <h2>🏆 شکارچی مسابقات رایگان BloFin Demo (بدون واریز)</h2>
+      <p class="muted">فقط صفحات عمومی رسمی BloFin خوانده می‌شوند. هیچ ورود، ثبت‌نام، واریز یا سفارشی انجام نمی‌شود.</p>
+      <label style="display:flex;align-items:center;gap:10px;margin:12px 0">
+        <input id="blofin-demo-only-filter" type="checkbox" style="width:auto">
+        فقط نامزدهای Demo بدون شرط Live یا واریز
+      </label>
+      <button type="button" id="blofin-demo-scan">اسکن مسابقات رسمی</button>
+      <p id="blofin-demo-status" class="muted" aria-live="polite">برای دریافت اطلاعات تازه، اسکن را دستی اجرا کن.</p>
+      <div id="blofin-demo-results" class="grid"></div>
+      <p class="muted">هشدار: «احتمالاً Demo-only» تضمین واجدشرایط بودن نیست. تاریخ ثبت‌نام، کشور/منطقه، KYC، شرایط کامل و نوع جایزه باید در صفحه رسمی کمپین بررسی شوند. وضعیت نامشخص یا خطای دریافت، مسابقه فعال محسوب نمی‌شود.</p>
+      <script>
+      (function(){
+        const button=document.getElementById('blofin-demo-scan');
+        const status=document.getElementById('blofin-demo-status');
+        const results=document.getElementById('blofin-demo-results');
+        const filter=document.getElementById('blofin-demo-only-filter');
+        if(!button||!status||!results||!filter)return;
+        let items=[];
+        const labels={POTENTIALLY_DEMO_ONLY:'نامزد Demo-only، نیازمند بررسی شرایط',LIVE_REQUIREMENTS_FOUND:'دارای شرط Live/واریز/حجم',NOT_DEMO_CONFIRMED:'Demo تأیید نشده'};
+        const states={POSSIBLY_ACTIVE:'احتمالاً فعال، تاریخ/شرایط را بررسی کن',ENDED:'پایان‌یافته',UNKNOWN:'وضعیت نامشخص'};
+        function render(){
+          const shown=filter.checked?items.filter(x=>x.demo_only_status==='POTENTIALLY_DEMO_ONLY'&&x.campaign_status==='POSSIBLY_ACTIVE'):items;
+          results.replaceChildren();
+          if(!shown.length){
+            const empty=document.createElement('p');empty.className='muted';
+            empty.textContent=items.length?'موردی مطابق فیلتر انتخابی پیدا نشد.':'هنوز نتیجه‌ای برای نمایش وجود ندارد.';
+            results.append(empty);return;
+          }
+          shown.forEach(item=>{
+            const card=document.createElement('article');card.className='metric';
+            const title=document.createElement('strong');title.textContent=item.title||'کمپین بدون عنوان';
+            const state=document.createElement('div');state.textContent=(labels[item.demo_only_status]||item.demo_only_status)+' · '+(states[item.campaign_status]||item.campaign_status);
+            const note=document.createElement('p');note.className='muted';note.textContent=item.eligibility_note||'';
+            const evidence=document.createElement('p');evidence.textContent='شواهد: Demo '+(item.demo_evidence?'دارد':'ندارد')+' · شرط Live/واریز '+(item.live_requirement_evidence?'دارد':'در متن بازیابی‌شده یافت نشد');
+            const link=document.createElement('a');link.href=item.url;link.target='_blank';link.rel='noopener noreferrer';link.textContent='مشاهده صفحه رسمی کمپین';
+            card.append(title,state,evidence,note,link);results.append(card);
+          });
+        }
+        filter.addEventListener('change',render);
+        button.addEventListener('click',async()=>{
+          button.disabled=true;status.textContent='در حال خواندن صفحات عمومی رسمی BloFin...';
+          try{
+            const response=await fetch('/api/blofin/demo-challenges/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',cache:'no-store'});
+            const data=await response.json();
+            if(!response.ok)throw new Error(data.message_fa||data.status||('HTTP '+response.status));
+            items=Array.isArray(data.results)?data.results:[];
+            status.textContent='اسکن: '+(data.scanned_at_utc||'زمان نامشخص')+' · '+items.length+' کمپین · خطاهای دریافت: '+(Array.isArray(data.errors)?data.errors.length:0);
+            render();
+          }catch(error){items=[];render();status.textContent='اسکن ناموفق بود؛ نتیجه قدیمی یا حدسی نمایش داده نمی‌شود. '+String(error.message||error);}
+          finally{button.disabled=false;}
+        });
+      })();
+      </script>
+    </section>"""
+
+
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
     body = (
         body.replace("<!--RADAR_GEM_HUNTER-->", _radar_panel(
@@ -2097,6 +2159,7 @@ def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
             "وضعیت نهایی فقط بعد از دریافت پاسخ کامل موتور تحلیل روی رادار ثبت می‌شود."
         ))
         .replace("<!--LEARNING_LESSONS_PANEL-->", _learning_lessons_panel_html())
+        .replace("<!--BLOFIN_DEMO_CHALLENGES-->", _blofin_demo_challenge_panel_html())
     )
     return f"""<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
@@ -7411,6 +7474,31 @@ def _ai_copilot_dashboard_context() -> dict:
     }
 
 
+def _fetch_blofin_demo_public_page(url: str) -> str:
+    """Fetch public BloFin pages while validating every redirect hop."""
+    allowed_hosts = {"blofin.com", "www.blofin.com", "v3.blofin.com"}
+    current_url = url
+    for _ in range(4):
+        parsed = urlparse(current_url)
+        if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
+            raise ValueError("Only official HTTPS BloFin domains are allowed.")
+        response = requests.get(
+            current_url,
+            headers={"User-Agent": "CRYPTO-SUPER-RADAR-DemoChallengeHunter/1.0"},
+            timeout=(5, 20),
+            allow_redirects=False,
+        )
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("Location")
+            if not location:
+                raise ValueError("BloFin returned a redirect without a Location header.")
+            current_url = urljoin(current_url, location)
+            continue
+        response.raise_for_status()
+        return response.text
+    raise ValueError("Too many redirects while fetching official BloFin pages.")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
@@ -7452,6 +7540,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
+        if parsed.path == "/api/blofin/demo-challenges":
+            payload = {
+                "status": "READY", "source": BLOFIN_ACTIVITY_URL,
+                "mode": "READ_ONLY_PUBLIC_DATA", "orders_submitted": False,
+                "registration_submitted": False, "deposit_submitted": False,
+            }
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/ai/status":
             payload = ai_supervisor_status()
             payload["status_scope"] = "OPTIONAL_MULTI_PROVIDER_CONFIGURATION_ONLY"
@@ -9565,6 +9661,7 @@ async function loadBlofinInstruments(){
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+        <!--BLOFIN_DEMO_CHALLENGES-->
         <!--LEARNING_LESSONS_PANEL-->
         <section class="card" id="paper-performance">
           <h2>ارزیابی عملکرد معاملات آزمایشی</h2>
@@ -11046,6 +11143,38 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        if route == "/api/blofin/demo-challenges/scan":
+            origin = self.headers.get("Origin", "")
+            request_host = self.headers.get("Host", "")
+            if not origin or urlparse(origin).netloc.lower() != request_host.lower():
+                return self._send(403, b'{"status":"FORBIDDEN","code":"SAME_ORIGIN_REQUIRED"}',
+                                  "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 1024:
+                return self._send(413, b'{"status":"INVALID_PAYLOAD_SIZE"}', "application/json; charset=utf-8")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON object required")
+                report = scan_blofin_demo_challenges(
+                    _fetch_blofin_demo_public_page, activity_url=BLOFIN_ACTIVITY_URL, max_pages=30,
+                )
+                return self._send(200, json.dumps(report, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._send(400, json.dumps({"status":"INVALID_REQUEST","message_fa":str(exc)},
+                                                   ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(502, json.dumps({
+                    "status":"SCAN_UNAVAILABLE", "error_type":type(exc).__name__,
+                    "message_fa":"دریافت اطلاعات عمومی BloFin ناموفق بود؛ هیچ نتیجه‌ای به‌عنوان مسابقه فعال تأیید نمی‌شود.",
+                    "read_only":True, "orders_submitted":False, "registration_submitted":False,
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
         if route in {"/api/blofin-demo/manual-wave-order", "/api/blofin-demo/manual-wave-close"}:
             expected_token=os.getenv("BLOFIN_DASHBOARD_TOKEN","").strip()
             if not _blofin_dashboard_token_valid(self.headers.get("Authorization",""),expected_token):
