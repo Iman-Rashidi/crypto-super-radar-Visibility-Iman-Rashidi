@@ -200,6 +200,17 @@ def collect(
                 "returned_count": len(rows),
                 "matched_count": len(matched),
                 "matched_rows": [redact(row) for row in matched],
+                "funding_fee_observations": [
+                    {
+                        "history_state": requested_state,
+                        "fundingFee": redact(row.get("fundingFee")),
+                    }
+                    for row in matched
+                    if "fundingFee" in row
+                ],
+                "funding_fee_field_present": any(
+                    "fundingFee" in row for row in matched
+                ),
                 "rejected_sample_count": len(rejected_sample),
                 "rejected_sample": [
                     redact(row) for row in rejected_sample
