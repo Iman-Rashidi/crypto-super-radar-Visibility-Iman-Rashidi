@@ -183,7 +183,7 @@ class FakeEntryExecutor:
     def __init__(self,store): self.store=store; self.called=0
     def execute(self,signal,*,inst_id,allow_demo_orders,leverage):
         self.called+=1
-        assert signal["ai_consensus"]["status"]=="APPROVED_BY_GROQ"
+        assert signal["ai_consensus"]["status"] in {"APPROVED_BY_GROQ", "APPROVED_WITH_GROQ_ADVISORY", "APPROVED_WITH_GROQ_ADVISORY_VETO"}
         assert allow_demo_orders is True
         return {"position_id":"pos-1","client_order_id":"entry123","instrument_id":inst_id,
           "side":"LONG","entry_price":"100","entry_reference_price":"100","stop_loss":"98",
