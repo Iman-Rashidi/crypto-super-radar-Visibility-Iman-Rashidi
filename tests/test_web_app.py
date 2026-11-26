@@ -1485,26 +1485,67 @@ class WebAppHttpTests(unittest.TestCase):
             {"reserved_risk_usdt": "10"},
             {"reserved_risk_usdt": "10"},
             {"reserved_risk_usdt": "10"},
+            {"reserved_risk_usdt": "10"},
         ]
-        experiences = [experience(10, False), experience(-5, False), experience(2, True, valid=False)]
+        experiences = [
+            experience(10, False), experience(-5, False),
+            experience(2, True), experience(7, False, valid=False),
+        ]
         result = web_app._challenge1_v2_demo_performance_metrics(
-            orders, experiences, closed_order_count=3, open_trade_count=2, pending_order_count=1,
+            orders, experiences, closed_order_count=4, open_trade_count=2, pending_order_count=1,
             groq_decision_counts={"vetoed": 4, "not_vetoed": 6, "unknown": 1},
             target_trade_count=50,
         )
-        self.assertEqual(result["closed_order_count"], 3)
-        self.assertEqual(result["valid_closed_trade_count"], 2)
+        self.assertEqual(result["closed_order_count"], 4)
+        self.assertEqual(result["valid_closed_trade_count"], 3)
         self.assertEqual(result["open_trade_count"], 2)
         self.assertEqual(result["pending_order_count"], 1)
-        self.assertEqual(result["win_rate_pct"], 50.0)
-        self.assertEqual(result["net_pnl_usdt"], 5.0)
-        self.assertEqual(result["average_r"], 0.25)
+        self.assertAlmostEqual(result["win_rate_pct"], 66.6666666667)
+        self.assertEqual(result["net_pnl_usdt"], 7.0)
+        self.assertAlmostEqual(result["average_r"], 7.0 / 30.0)
         self.assertEqual(result["groq_decision_counts"]["vetoed"], 4)
         self.assertEqual(result["groq_closed_trade_performance"]["not_vetoed"]["closed_trade_count"], 2)
-        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 0)
+        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 1)
         self.assertEqual(result["rejected_or_unverified_closed_count"], 1)
         self.assertTrue(result["read_only"])
         self.assertFalse(result["orders_submitted"])
+
+    def test_challenge1_v2_demo_performance_sample_threshold_uses_verified_trades(self):
+        def completed_trade(index, pnl, vetoed):
+            return {
+                "verification": {"status": "PASS"},
+                "environment": "BLOFIN_DEMO",
+                "challenge_id": "CHALLENGE_1_V2_BLOFIN_DEMO",
+                "decision_mode": "BOT_ONLY",
+                "events": [
+                    {"event_type": "DECISION_RECORDED", "payload": {
+                        "input_snapshot": {"ai_consensus": {"groq_vetoed": vetoed}}
+                    }},
+                    {"event_type": "OUTCOME_LABELLED", "payload": {
+                        "final": True,
+                        "realized_result": "PROFIT" if pnl > 0 else "LOSS",
+                        "realized_net_pnl": pnl,
+                        "pnl_currency": "USDT",
+                        "evidence": {
+                            "trade_executed": True,
+                            "mark_to_market_pnl_used": False,
+                            "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
+                        },
+                    }},
+                ],
+            }
+        orders = [{"reserved_risk_usdt": "20"} for _ in range(50)]
+        experiences = [completed_trade(i, 1 if i % 2 == 0 else -1, i % 3 == 0) for i in range(50)]
+        result = web_app._challenge1_v2_demo_performance_metrics(
+            orders, experiences, closed_order_count=50, open_trade_count=0,
+            groq_decision_counts={"vetoed": 10, "not_vetoed": 40, "unknown": 0},
+        )
+        self.assertEqual(result["status"], "SAMPLE_TARGET_REACHED")
+        self.assertEqual(result["valid_closed_trade_count"], 50)
+        self.assertEqual(result["win_rate_pct"], 50.0)
+        self.assertAlmostEqual(result["average_r"], 0.0)
+        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 17)
+        self.assertEqual(result["groq_closed_trade_performance"]["not_vetoed"]["closed_trade_count"], 33)
 
     def test_challenge1_v2_demo_performance_reports_open_positions_when_no_trade_closed(self):
         result = web_app._challenge1_v2_demo_performance_metrics(
@@ -1524,14 +1565,26 @@ class WebAppHttpTests(unittest.TestCase):
             "open_trade_count": 2, "pending_order_count": 1,
             "orders_submitted": False, "read_only": True,
         }
-        with patch.object(web_app, "_blofin_challenge1_v2_performance_report", return_value=payload):
-            status, _, body = self.request("GET", "/api/blofin/demo/challenge1-v2/performance")
+        with (
+            patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}),
+            patch.object(web_app, "_blofin_challenge1_v2_performance_report", return_value=payload),
+        ):
+            status, _, body = self.request(
+                "GET", "/api/blofin/demo/challenge1-v2/performance",
+                headers={"Authorization": "Bearer test-dashboard-token"},
+            )
         result = json.loads(body)
         self.assertEqual(status, 200)
         self.assertEqual(result["status"], "NO_CLOSED_TRADES")
         self.assertEqual(result["open_trade_count"], 2)
         self.assertEqual(result["pending_order_count"], 1)
         self.assertFalse(result["orders_submitted"])
+
+    def test_challenge1_v2_demo_performance_endpoint_requires_dashboard_token(self):
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}):
+            status, _, body = self.request("GET", "/api/blofin/demo/challenge1-v2/performance")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body)["status"], "UNAUTHORIZED")
 
     def test_challenge1_v2_demo_performance_endpoint_fails_closed_without_turso(self):
         with patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"):
