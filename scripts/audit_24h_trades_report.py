@@ -1,8 +1,10 @@
 """Read-only 24h BloFin Demo/Turso audit. No order-writing API is imported or called."""
 from __future__ import annotations
-import json, os
+import json, os, sys
+from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crypto_super_radar.database import connect_database, storage_backend
 from crypto_super_radar.blofin_demo_readonly import BloFinDemoReadOnly
 from crypto_super_radar.telegram_notifier import TelegramNotifier
