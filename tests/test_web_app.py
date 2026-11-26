@@ -1485,23 +1485,27 @@ class WebAppHttpTests(unittest.TestCase):
             {"reserved_risk_usdt": "10"},
             {"reserved_risk_usdt": "10"},
             {"reserved_risk_usdt": "10"},
+            {"reserved_risk_usdt": "10"},
         ]
-        experiences = [experience(10, False), experience(-5, False), experience(2, True, valid=False)]
+        experiences = [
+            experience(10, False), experience(-5, False),
+            experience(2, True), experience(7, False, valid=False),
+        ]
         result = web_app._challenge1_v2_demo_performance_metrics(
-            orders, experiences, closed_order_count=3, open_trade_count=2, pending_order_count=1,
+            orders, experiences, closed_order_count=4, open_trade_count=2, pending_order_count=1,
             groq_decision_counts={"vetoed": 4, "not_vetoed": 6, "unknown": 1},
             target_trade_count=50,
         )
-        self.assertEqual(result["closed_order_count"], 3)
-        self.assertEqual(result["valid_closed_trade_count"], 2)
+        self.assertEqual(result["closed_order_count"], 4)
+        self.assertEqual(result["valid_closed_trade_count"], 3)
         self.assertEqual(result["open_trade_count"], 2)
         self.assertEqual(result["pending_order_count"], 1)
-        self.assertEqual(result["win_rate_pct"], 50.0)
-        self.assertEqual(result["net_pnl_usdt"], 5.0)
-        self.assertEqual(result["average_r"], 0.25)
+        self.assertAlmostEqual(result["win_rate_pct"], 66.6666666667)
+        self.assertEqual(result["net_pnl_usdt"], 7.0)
+        self.assertAlmostEqual(result["average_r"], 7.0 / 30.0)
         self.assertEqual(result["groq_decision_counts"]["vetoed"], 4)
         self.assertEqual(result["groq_closed_trade_performance"]["not_vetoed"]["closed_trade_count"], 2)
-        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 0)
+        self.assertEqual(result["groq_closed_trade_performance"]["vetoed"]["closed_trade_count"], 1)
         self.assertEqual(result["rejected_or_unverified_closed_count"], 1)
         self.assertTrue(result["read_only"])
         self.assertFalse(result["orders_submitted"])
