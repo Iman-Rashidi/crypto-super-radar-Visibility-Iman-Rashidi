@@ -12,7 +12,7 @@ from crypto_super_radar.telegram_notifier import TelegramNotifier
 SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 START_LOCAL = datetime(2026, 11, 25, 0, 0, tzinfo=ZoneInfo("Europe/Berlin"))
 START_MS = int(START_LOCAL.timestamp() * 1000)
-AUDIT_KEY = "audit-24h:2026-11-25T00:00:00+01:00:v1"
+AUDIT_KEY = "audit-24h:2026-11-25T00:00:00+01:00:v2"
 
 def rows(value):
     if isinstance(value, dict):
@@ -44,14 +44,14 @@ def main():
         current_positions = rows(client.get_positions())
         current_open = [
             x for x in current_positions
-            if abs(num(x.get("pos") or x.get("positionSize") or x.get("availPos"))) > 0
+            if abs(num(x.get("positions") or x.get("pos") or x.get("positionSize") or x.get("availablePositions") or x.get("availPos"))) > 0
         ]
         history = []
         for symbol in SYMBOLS:
             history.extend(rows(client.get_positions_history(inst_id=symbol, limit=100)))
         filtered = []
         for item in history:
-            ts = num(item.get("cTime") or item.get("uTime") or item.get("createTime"))
+            ts = num(item.get("createTime") or item.get("updateTime") or item.get("cTime") or item.get("uTime"))
             if 0 < ts < 10_000_000_000:
                 ts *= 1000
             if ts >= START_MS:
@@ -64,19 +64,25 @@ def main():
             rec = grouped.setdefault(pid, {
                 "position_id": pid, "instrument_id": str(item.get("instId") or ""),
                 "states": set(), "realized_before_fees": 0.0, "fees": 0.0,
+                "close_positions": 0.0, "max_positions": 0.0,
                 "history_rows": 0, "local": local_by_pid.get(pid),
             })
-            rec["states"].add(str(item.get("state") or "").upper())
+            rec["close_positions"] += num(item.get("closePositions"))
+            rec["max_positions"] = max(rec["max_positions"], num(item.get("maxPositions")))
             rec["realized_before_fees"] += num(item.get("realizedPnl"))
             rec["fees"] += abs(num(item.get("fee")))
             rec["history_rows"] += 1
         trades = []
         for rec in grouped.values():
+            tolerance = max(1e-9, rec["max_positions"] * 1e-6)
+            rec["states"] = ({"CLOSED"} if rec["max_positions"] > 0 and rec["close_positions"] + tolerance >= rec["max_positions"] else {"PARTIALLY_CLOSED"})
             trades.append({
                 "position_id": rec["position_id"], "instrument_id": rec["instrument_id"],
                 "states": sorted(rec["states"]), "local_order_matched": rec["local"] is not None,
                 "local_order_status": (rec["local"] or {}).get("status"),
                 "history_rows": rec["history_rows"],
+                "closed_quantity": round(rec["close_positions"], 12),
+                "maximum_position_quantity": round(rec["max_positions"], 12),
                 "realized_pnl_before_fees_usdt": round(rec["realized_before_fees"], 8),
                 "trading_fees_usdt": round(rec["fees"], 8),
                 "net_after_reported_trading_fees_usdt": round(rec["realized_before_fees"] - rec["fees"], 8),
@@ -98,12 +104,15 @@ def main():
                 "instrument_id": x.get("instId"),
                 "position_id": x.get("positionId") or x.get("posId"),
                 "side": x.get("posSide") or x.get("side"),
-                "size": x.get("pos") or x.get("positionSize") or x.get("availPos"),
+                "size": x.get("positions") or x.get("pos") or x.get("positionSize") or x.get("availablePositions") or x.get("availPos"),
                 "floating_pnl_usdt": num(x.get("upl") or x.get("unrealizedPnl")),
             } for x in current_open],
             "local_orders_created_in_window": len(local),
             "exchange_history_position_count": len(trades),
             "closed_position_count": len(closed),
+            "closed_local_matched_count": sum(1 for x in closed if x["local_order_matched"]),
+            "closed_unmatched_count": sum(1 for x in closed if not x["local_order_matched"]),
+            "closed_local_matched_net_after_fees_usdt": round(sum(x["net_after_reported_trading_fees_usdt"] for x in closed if x["local_order_matched"]), 8),
             "closed_net_after_reported_trading_fees_usdt": round(sum(x["net_after_reported_trading_fees_usdt"] for x in closed), 8),
             "funding_included": False,
             "waiting_for_final_reconciliation_count": len(waiting),
