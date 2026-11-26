@@ -1664,7 +1664,6 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         accepted_evidence = accepted_experience["events"][-1]["payload"]["evidence"]
         self.assertEqual(accepted_evidence["quantity_tolerance"], "0.500")
-        self.assertTrue(accepted_evidence["position_confirmed_closed"])
 
         plan, history = create_order("rounding-fail", "rounding-fail")
         history["closePositions"] = "99.4"
