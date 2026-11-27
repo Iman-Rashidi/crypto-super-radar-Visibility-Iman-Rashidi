@@ -71,6 +71,20 @@ class TelegramNotifierTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row, (TARGET_USERNAME, TARGET_CHAT_ID, TARGET_CHAT_ID))
 
+    def test_empty_and_whitespace_chat_id_environment_values_use_approved_fallback(self):
+        for env in (
+            {},
+            {"TELEGRAM_CHAT_ID": ""},
+            {"TELEGRAM_CHAT_ID": "   "},
+            {"TELEGRAM_CHAT_ID": "", "CSR_TELEGRAM_CHAT_ID": "  "},
+        ):
+            with self.subTest(env=env), patch.dict("os.environ", env, clear=True):
+                notifier = TelegramNotifier(
+                    token="test-token", connection=self.db, http_post=self.notifier.http_post
+                )
+                self.assertEqual(notifier.chat_id, 1196927671)
+                self.assertEqual(notifier.resolve_recipient()["chat_id"], 1196927671)
+
     def test_chat_id_alias_is_supported_and_must_match_approved_recipient(self):
         with patch.dict("os.environ", {"CSR_TELEGRAM_CHAT_ID": str(TARGET_CHAT_ID)}, clear=True):
             notifier = TelegramNotifier(token="test-token", connection=self.db, http_post=self.notifier.http_post)
