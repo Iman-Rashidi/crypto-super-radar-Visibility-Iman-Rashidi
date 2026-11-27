@@ -266,10 +266,19 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None,
                     try:
                         partial_rows = _rows(client.get_positions_history(inst_id=inst, state="partially_closed", limit=100))
                         closed_rows = _rows(client.get_positions_history(inst_id=inst, state="closed", limit=100))
+                        lot_size = None
+                        try:
+                            contract = client.get_tradable_instrument(inst)
+                            if isinstance(contract, Mapping):
+                                lot_size = contract.get("lotSize")
+                        except Exception:
+                            # The 0.5% fallback remains available if contract metadata
+                            # cannot be refreshed; never guess a lot step.
+                            lot_size = None
                         outcome = store.record_closed_position_outcome(
                             instrument_id=inst, history_rows=closed_rows, partial_rows=partial_rows,
                             client_order_id=str(state.get("client_order_id") or ""), position_id=pid,
-                            position_confirmed_closed=True,
+                            position_confirmed_closed=True, lot_size=lot_size,
                         )
                         if isinstance(outcome, Mapping) and outcome.get("status") == "RECORDED":
                             history = [r for r in (partial_rows + closed_rows)
