@@ -1546,6 +1546,78 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.orders_pending_learning_outcome(), [])
 
+    def test_confirmed_closed_quantity_uses_max_of_exchange_lot_and_half_percent(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT", challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="lot-tolerance-order")
+        self.assertTrue(self.store.attach_position_id(experience_id, "lot-tolerance-position"))
+        order = self.store.get_order(plan["client_order_id"])
+        opened_ms = int(order["created_at"]) * 1000 + 5000
+
+        # A one-contract discrepancy is accepted when it equals the exchange lot step.
+        self.store._db.execute(
+            "UPDATE blofin_demo_orders SET quantity='100',filled_size='100' WHERE client_order_id=?",
+            (plan["client_order_id"],),
+        )
+        lot_history = {
+            "historyId": "lot-tolerance-history",
+            "positionId": "lot-tolerance-position",
+            "instId": "BTC-USDT",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": "99",
+            "maxPositions": "100",
+            "realizedPnl": "1.0",
+            "fee": "0",
+        }
+        lot_result = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT", history_rows=[lot_history],
+            client_order_id=plan["client_order_id"], position_id="lot-tolerance-position",
+            position_confirmed_closed=True, lot_size="1",
+        )
+        self.assertEqual(lot_result["status"], "RECORDED")
+        self.assertEqual(self.store.get_order(plan["client_order_id"])["status"], "CLOSED")
+
+    def test_confirmed_closed_quantity_uses_half_percent_when_larger_than_lot_step(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT", challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="half-percent-order")
+        self.assertTrue(self.store.attach_position_id(experience_id, "half-percent-position"))
+        order = self.store.get_order(plan["client_order_id"])
+        opened_ms = int(order["created_at"]) * 1000 + 5000
+        self.store._db.execute(
+            "UPDATE blofin_demo_orders SET quantity='1000',filled_size='1000' WHERE client_order_id=?",
+            (plan["client_order_id"],),
+        )
+        history = {
+            "historyId": "half-percent-history",
+            "positionId": "half-percent-position",
+            "instId": "BTC-USDT",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": "995",
+            "maxPositions": "1000",
+            "realizedPnl": "1.0",
+            "fee": "0",
+        }
+        result = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT", history_rows=[history],
+            client_order_id=plan["client_order_id"], position_id="half-percent-position",
+            position_confirmed_closed=True, lot_size="0.1",
+        )
+        self.assertEqual(result["status"], "RECORDED")
+        self.assertEqual(self.store.get_order(plan["client_order_id"])["status"], "CLOSED")
+
     def test_closed_position_outcome_requires_exact_position_id_and_full_quantity(self):
         challenge = signal_record()
         experience_id = self.store.record_challenge1_decision(
