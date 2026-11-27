@@ -1,6 +1,6 @@
 name: Challenge 1 V2 Demo autopilot worker
 # Post-deploy Staging validation after Render bundle d17b44a (Groq model update).
-# Post-deploy Staging validation trigger; no runtime behavior change.
+# One-time message-gated push authorization for the explicitly requested Demo verification cycle.
 
 on:
   push:
@@ -46,8 +46,9 @@ concurrency:
 
 jobs:
   v2-demo-cycle:
-    # Pushes (including this configuration commit) never place orders. A manual run needs explicit YES.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_demo_execution == 'YES' && vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
+    # One-time push is authorized only by this exact commit message; all other pushes remain closed.
+    # Manual dispatch continues to require explicit YES.
+    if: ${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_demo_execution == 'YES') || (github.event_name == 'push' && github.event.head_commit.message == 'chore: run immediate guarded BloFin Demo verification cycle')) && vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
