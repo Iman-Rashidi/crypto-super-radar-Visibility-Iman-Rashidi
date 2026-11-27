@@ -24,11 +24,21 @@ on:
       - tests/test_telegram_notifier.py
       - tests/test_challenge1_v2_supervisor_failover.py
       - tests/test_challenge1_v2_web_orchestration.py
+  # GitHub scheduled workflows are evaluated only from the repository default branch.
+  # This Staging worker is manually dispatchable; the default-branch scheduler is intentionally untouched.
   workflow_dispatch:
+    inputs:
+      confirm_demo_execution:
+        description: 'Set YES to authorize exactly one guarded BloFin Demo cycle.'
+        required: true
+        type: choice
+        options:
+          - NO
+          - YES
+        default: NO
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: challenge1-v2-demo-autopilot
@@ -36,8 +46,8 @@ concurrency:
 
 jobs:
   v2-demo-cycle:
-    # Enabled by default; explicit false remains the kill switch.
-    if: false # Manual-only pause requested for the remainder of November 2026.
+    # Pushes (including this configuration commit) never place orders. A manual run needs explicit YES.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_demo_execution == 'YES' && vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -48,7 +58,7 @@ jobs:
       CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED || 'true' }}
       # Easy Demo V2 worker may open entries under the four-slot executor cap; exit management remains active every cycle.
       CHALLENGE_1_V2_MANAGE_ONLY: "false"
-      CHALLENGE_1_V2_LEVERAGE: '2'
+      CHALLENGE_1_V2_LEVERAGE: '1'
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       BLOFIN_DEMO_TRADING_ENABLED: ${{ vars.BLOFIN_DEMO_TRADING_ENABLED || 'true' }}
@@ -137,64 +147,7 @@ jobs:
           finally:
               connection.close()
           PY
-      - name: Publish verified Demo cycle to Staging dashboard Turso
-        if: success()
-        env:
-          STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
-          OIDC_AUDIENCE: csr-staging-cycle-sync
-        shell: python
-        run: |
-          import json
-          import os
-          import time
-          import urllib.error
-          import urllib.parse
-          import urllib.request
-
-          token_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
-          token_url += ("&" if "?" in token_url else "?") + urllib.parse.urlencode({
-              "audience": os.environ["OIDC_AUDIENCE"]
-          })
-          token_request = urllib.request.Request(
-              token_url,
-              headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
-          )
-          with urllib.request.urlopen(token_request, timeout=20) as response:
-              oidc_token = json.loads(response.read().decode("utf-8"))["value"]
-
-          with open(os.path.join(os.environ["RUNNER_TEMP"], "challenge1-v2-cycle.json"), encoding="utf-8") as handle:
-              cycle = json.load(handle)
-          body = json.dumps(cycle, ensure_ascii=False).encode("utf-8")
-          request = urllib.request.Request(
-              os.environ["STAGING_URL"].rstrip("/") + "/api/blofin/demo/v2-autopilot/publish",
-              data=body,
-              headers={
-                  "Authorization": "Bearer " + oidc_token,
-                  "Content-Type": "application/json",
-                  "Accept": "application/json",
-              },
-              method="POST",
-          )
-          for attempt in range(1, 4):
-              try:
-                  with urllib.request.urlopen(request, timeout=45) as response:
-                      result = json.loads(response.read().decode("utf-8"))
-                      print(json.dumps(result, ensure_ascii=False))
-                      assert response.status == 200
-                      assert result.get("status") == "PUBLISHED"
-                      assert result.get("rows_written") == 5
-                  break
-              except urllib.error.HTTPError as exc:
-                  if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
-                      raise
-                  print(f"Staging publish HTTP {exc.code}; retry {attempt}/3")
-                  time.sleep(attempt * 2)
-              except (TimeoutError, urllib.error.URLError) as exc:
-                  if attempt == 3:
-                      raise
-                  print(f"Staging publish transient {type(exc).__name__}; retry {attempt}/3")
-                  time.sleep(attempt * 2)
-
+      # Render dashboard publishing is deliberately omitted: the Worker persists directly to Turso.
       - name: Upload non-secret V2 cycle report
         if: always()
         uses: actions/upload-artifact@v4
