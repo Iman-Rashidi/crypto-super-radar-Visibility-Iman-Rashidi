@@ -2475,6 +2475,7 @@ class BloFinDemoEventStore:
         self, *, instrument_id: str, history_rows: Any, partial_rows: Any = None,
         client_order_id: str | None = None, position_id: str | None = None,
         position_confirmed_closed: bool = False,
+        lot_size: Any = None,
     ) -> dict[str, Any] | None:
         """Reconcile exact BloFin position history; realizedPnl is net of fees and funding."""
         instrument = str(instrument_id or "").strip().upper()
@@ -2581,10 +2582,25 @@ class BloFinDemoEventStore:
         # confirmed that the exact exchange position is no longer open and a
         # CLOSED history row has been matched to this exact positionId.
         # This never relaxes entry sizing, protective-order sizing, or risk math.
-        quantity_tolerance = max(
-            Decimal("0.000000001"),
-            expected_qty * (Decimal("0.005") if position_confirmed_closed else Decimal("0.000001")),
-        )
+        if position_confirmed_closed:
+            try:
+                exchange_lot_size = (
+                    _decimal(lot_size, "lot_size")
+                    if lot_size not in (None, "")
+                    else Decimal("0")
+                )
+            except ValueError:
+                return {"status": "WAITING_FOR_VALID_LOT_SIZE", "position_id": pid}
+            if exchange_lot_size < 0:
+                return {"status": "WAITING_FOR_VALID_LOT_SIZE", "position_id": pid}
+            quantity_tolerance = max(
+                exchange_lot_size,
+                expected_qty * Decimal("0.005"),
+            )
+        else:
+            # Keep the strict pre-confirmation comparison; rounding tolerance is
+            # only widened after the exact exchange position is confirmed closed.
+            quantity_tolerance = Decimal("0.000001")
         quantity_difference = abs(total_qty - expected_qty)
         if quantity_difference > quantity_tolerance:
             mismatch = {
