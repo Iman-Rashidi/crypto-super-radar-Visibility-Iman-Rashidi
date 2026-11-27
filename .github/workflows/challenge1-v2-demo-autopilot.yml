@@ -48,7 +48,8 @@ jobs:
   v2-demo-cycle:
     # One-time push is authorized only by this exact commit message; all other pushes remain closed.
     # Manual dispatch continues to require explicit YES.
-    if: "${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_demo_execution == 'YES') || (github.event_name == 'push' && github.event.head_commit.message == 'chore: run immediate guarded BloFin Demo verification cycle')) && vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}"
+    # Temporary push authorization closed after the failed no-job attempt; manual dispatch still requires explicit YES.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_demo_execution == 'YES' && vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
