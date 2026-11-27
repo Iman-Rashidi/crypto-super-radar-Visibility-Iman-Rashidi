@@ -38,7 +38,15 @@ class TelegramNotifier:
         self.token = str(token if token is not None else (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("CSR_TELEGRAM_BOT_TOKEN") or "")).strip()
         configured_chat_id = chat_id
         if configured_chat_id is None:
-            configured_chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CSR_TELEGRAM_CHAT_ID") or TARGET_CHAT_ID
+            # Treat unset, empty, and whitespace-only environment values identically.
+            configured_chat_id = next(
+                (
+                    value
+                    for name in ("TELEGRAM_CHAT_ID", "CSR_TELEGRAM_CHAT_ID")
+                    if (value := str(os.getenv(name) or "").strip())
+                ),
+                str(TARGET_CHAT_ID),
+            )
         try:
             self.chat_id = int(str(configured_chat_id).strip())
         except (TypeError, ValueError):
