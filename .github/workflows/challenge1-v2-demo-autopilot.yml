@@ -2,6 +2,15 @@ name: Challenge 1 V2 Demo autopilot worker
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm_demo_execution:
+        description: 'Set YES to authorize exactly one guarded BloFin Demo cycle.'
+        required: true
+        type: choice
+        options:
+          - NO
+          - YES
+        default: NO
 
 permissions:
   contents: read
